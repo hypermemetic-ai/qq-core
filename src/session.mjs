@@ -1695,7 +1695,12 @@ export function createQqService(ctx, config) {
         return typeof result?.text === "string" ? result.text : "";
       }
       const finder = ctx.get("image-finder", false);
-      if (finder && typeof finder.inFindMode === "function" && finder.inFindMode(sessionId)) {
+      const workflows = ctx.get("qq-workflows", false);
+      const inFind = Boolean(
+        (finder && typeof finder.inFindMode === "function" && finder.inFindMode(sessionId)) ||
+        (workflows?.workflows?.selected?.(sessionId) === "find"),
+      );
+      if (finder && inFind) {
         if (typeof finder.handlePrompt !== "function") {
           throw httpError(503, "image-finder: find mode is unavailable");
         }
