@@ -41,9 +41,12 @@ MessageIds through `agent.inbox`, while interrupt uses `keepInbox: true`.
 Live sessions wear a short number (`1 2 3 4 9 10 12 20 40 80`, then strange,
 then integers above 100). The book is schema `qq.alias/v1`, persisted at
 `.qq-aliases.json` beside `DSH_HOME` (`aliasFile` overrides), mode `0600`,
-written atomically. A leftover `.qq-relay-aliases.json` is read once and
-migrated onto the new path. `list` / `read` include `alias` only while the
-session is live. The UUID stays the identity; the number is the face.
+written atomically. Tests must not inherit that live path: `aliasFile`,
+`liveChairsFile`, `scratchRoot`, and `scopeFile` are all default (host) or
+all explicit (fixture). Mixing them is an error. A leftover
+`.qq-relay-aliases.json` is read once and migrated onto the new path.
+`list` / `read` include `alias` only while the session is live. The UUID
+stays the identity; the number is the face.
 
 ## Host recipe
 

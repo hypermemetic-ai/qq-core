@@ -647,6 +647,13 @@ export function createQqService(ctx, config) {
   if (!bootProject) {
     throw new Error("qq: cwd must equal one project root or registered folder");
   }
+  const persistKeys = ["aliasFile", "liveChairsFile", "scratchRoot", "scopeFile"];
+  const missingPersist = persistKeys.filter((key) => config[key] === undefined);
+  if (missingPersist.length > 0 && missingPersist.length < persistKeys.length) {
+    throw new Error(
+      `qq: aliasFile, liveChairsFile, scratchRoot, and scopeFile must all be set together (missing ${missingPersist.join(", ")})`,
+    );
+  }
   const defaultProject = bootProject.name;
   const scratch = createScratchManager({
     root: config.scratchRoot ?? defaultScratchRoot(),
