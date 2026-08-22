@@ -1,0 +1,102 @@
+# qq host attach recipe. `bin/qq` applies this list as a --patch overlay over
+# the pinned dsh-base bundle, so qq plus the sibling qq plugins present on disk
+# compose in one host process. This is the attach recipe, not a second product;
+# each sibling is bound only when its tree is present.
+
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+
+# DSH/Cordis owns plugin-fiber reload. Watch the qq tree plus bound sibling
+# plugins; a changed plugin is disposed through its reversible effects and
+# re-applied without restarting the host or its other fibers.
+- id: hmr
+  disabled: false
+  config:
+    # bin/qq exports the exact linked roots discovered by its generic sibling
+    # scan. Direct DSH boots fall back to the current workspace only.
+    root: !!js (process.env.QQ_DSH_HMR_ROOTS ?? process.cwd()).split(':').filter(Boolean)
+
+# Architect owns fold on this profile. compact-basic must not auto-summarize
+# the talking session; qq-workflows chops fat tool dumps and folds by notes.
+- id: compaction-basic
+  config:
+    auto: false
+
+# qq selects one real qwen-token-plan route rather than inheriting the base
+# bundle's DeepSeek default. The exact dated model is newer than the installed
+# pi-ai catalog, so this profile declares its current non-secret metadata while
+# inheriting qwen-token-plan's endpoint/protocol and referencing only its key.
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: !!js process.env.QQ_DSH_PROVIDER ?? 'qwen-token-plan'
+    model: !!js process.env.QQ_DSH_MODEL ?? 'deepseek-v4-pro-0813'
+
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      qwen-token-plan:
+        apiKeyEnv: QWEN_TOKEN_PLAN_API_KEY
+        models:
+          - id: deepseek-v4-pro-0813
+            name: DeepSeek V4 Pro 0813
+            contextWindow: 1000000
+            maxTokens: 384000
+            input: [text]
+            reasoningEfforts:
+              high: high
+              max: max
+            compat:
+              thinkingFormat: deepseek
+              supportsDeveloperRole: false
+              supportsReasoningEffort: true
+
+- insert:
+    - id: qq-webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      config:
+        host: 127.0.0.1
+        port: !!js Number(process.env.QQ_PORT ?? 3082)
+
+    - id: qq
+      name: '@hypermemetic-ai/qq'
+      inject: [agents, sessions, sessionPersistence]
+      config:
+        sessionId: !!js process.env.QQ_DSH_SESSION_ID
+        cwd: !!js process.env.QQ_DSH_CWD ?? process.cwd()
+        projectsRoot: !!js process.env.QQ_PROJECTS_ROOT ?? `${process.env.HOME}/projects`
+        # Operator projects live in project-catalog.json and are re-read on
+        # every list. Alternate QQ_PROJECTS_ROOT values keep automatic
+        # visible-folder discovery when that file's root does not match.
+        provider: !!js process.env.QQ_DSH_PROVIDER ?? 'qwen-token-plan'
+        model: !!js process.env.QQ_DSH_MODEL ?? 'deepseek-v4-pro-0813'
+        reasoningEffort: !!js process.env.QQ_DSH_REASONING_EFFORT
+
+    # Missing siblings must not stop qq from booting. `bin/qq` exports one
+    # HAVE flag per present sibling; the matching insert stays disabled when
+    # the directory is absent.
+    - id: qq-relay
+      name: '@hypermemetic-ai/qq-relay'
+      disabled: !!js process.env.QQ_DSH_HAVE_RELAY !== '1'
+      inject: [agents, sessions]
+
+    - id: qq-workflows
+      name: '@hypermemetic-ai/qq-workflows'
+      disabled: !!js process.env.QQ_DSH_HAVE_WORKFLOWS !== '1'
+      inject: [agents, sessions]
+      config:
+        settingsFile: !!js (process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`) + '/qq/workflows-settings.json'
+
+    - id: qq-ui
+      name: '@hypermemetic-ai/qq-ui'
+      disabled: !!js process.env.QQ_DSH_HAVE_UI !== '1'
+      inject: [qq, webServer]
+      config:
+        basePath: /qq
+        # HTML/render/CSS/browser assets re-read from the linked source tree.
+        # Plugin code itself reloads through HMR; phone chrome never needs a
+        # host restart or an immutable asset-version bump.
+        liveAssets: true

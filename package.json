@@ -1,0 +1,24 @@
+{
+  "name": "@hypermemetic-ai/qq",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Presentation-neutral Cordis service over DSH Agents and sessions.",
+  "main": "src/plugin.mjs",
+  "exports": {
+    ".": "./src/plugin.mjs",
+    "./session": "./src/session.mjs",
+    "./conversation": "./src/conversation.mjs",
+    "./files": "./src/files.mjs",
+    "./scratch": "./src/scratch.mjs",
+    "./session-scope": "./src/session-scope.mjs",
+    "./alias": "./src/alias.mjs",
+    "./ask": "./src/ask.mjs",
+    "./skill-tool": "./src/skill-tool.mjs"
+  },
+  "files": [
+    "src/",
+    "project-catalog.json",
+    "README.md"
+  ]
+}

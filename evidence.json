@@ -1,0 +1,120 @@
+{
+  "schema": "qq.host-evidence/v1",
+  "observed_at": "2026-08-17",
+  "dsh_pin": {
+    "package": "@deepseek-ai/dsh",
+    "version": "0.1.0-rc.7",
+    "revision": "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca"
+  },
+  "scope": {
+    "model": "sequential-single-page-handoff",
+    "one_page_usage_convention": true,
+    "simultaneous_client_coordination": false,
+    "controller_lease": false,
+    "browser_authority": false,
+    "persistence_owner": "DSH session persistence"
+  },
+  "runtime_probe": {
+    "verdict": "pass",
+    "entrypoint": "tests/test-qq-host-live.sh",
+    "profile": "qq",
+    "listener": "127.0.0.1 with an ephemeral test port",
+    "credential_used": false,
+    "model_boundary": "deterministic localhost DeepSeek-wire stub",
+    "steps": [
+      "Booted the local qq bundle over exact dsh-base without stock dsh-web-app",
+      "Sent from a home context while the active SSE stream rendered running and settled inner fragments",
+      "Created a fresh empty session through the in-page DSH factory action and flushed it before canonical navigation",
+      "Restarted on the first id, reopened the new empty persisted identity through the visible selector, and then sent its first turn",
+      "Submitted a laptop turn and invoked Agent.cancel through the SSE-inserted Interrupt control",
+      "Closed the laptop stream before opening a 390x844-labeled phone context and sending its turn",
+      "Restarted again and proved home-before-laptop-before-phone ordering in the primary DSH transcript"
+    ],
+    "durable_reconstruction": true,
+    "session_selection": true,
+    "session_creation": true,
+    "send": true,
+    "live_sse": true,
+    "interrupt": true
+  },
+  "browser_qa": {
+    "verdict": "pass",
+    "instructions": "qq/WEB_QA.md",
+    "engine": "Chromium through agent-browser",
+    "facts": [
+      "Two SSE messages covered running and settled swaps after one Send",
+      "The SSE owner and target retained object identity across four messages in the Send plus Interrupt flow",
+      "An Interrupt form inserted by SSE submitted successfully without htmx.process",
+      "Forced closure reconnected from one to two total SSE connections and delivered a complete fifth message",
+      "At the Pixel 10-sized 412x915 viewport only the consolidated identity/status/Sessions bar was visible by default; tapping Sessions disclosed the selector, Open, and New session controls without horizontal overflow",
+      "The inline composer ended exactly at the 412x915 safe-area edge, and a 412x520 reduced-height viewport kept the panel and composer at its bottom edge",
+      "A canonical page controlled by sw-v4.js and cache v4 used the existing Open action to navigate without a manual reload, immediately rendered console-v4.css, activated sw-v5.js, and removed the old cache",
+      "Literal script markup rendered as text and did not execute",
+      "The manifest, service worker, disconnected shell, and offline POST refusal passed"
+    ],
+    "physical_device": false
+  },
+  "sequential_client_test": {
+    "entrypoints": [
+      "node tests/test-qq-host.mjs .",
+      "tests/test-qq-host-live.sh"
+    ],
+    "verdict": "pass",
+    "contexts": [
+      "home",
+      "laptop",
+      "phone-390x844",
+      "local-again"
+    ],
+    "simultaneous_connections_required": false,
+    "canonical_identity": "session-<UUID>",
+    "ordered_transcript_owner": "DSH event log"
+  },
+  "hypermedia": {
+    "htmx": "2.0.10",
+    "official_sse_extension": "2.2.4",
+    "cdn": false,
+    "attribute_inheritance": false,
+    "history_cache_size": 0,
+    "sse_activated": true,
+    "sse_owner": "#console-stream",
+    "sse_target": "#session-panel",
+    "sse_owner_swap": "stable",
+    "sse_target_swap": "innerHTML",
+    "manual_htmx_process": false,
+    "websocket": false
+  },
+  "pwa": {
+    "verdict": "pass-for-minimal-install-boundary",
+    "display": "standalone",
+    "icons": [
+      "192x192",
+      "512x512"
+    ],
+    "cached": "exact versioned presentation assets plus disconnected shell only",
+    "network_only": [
+      "session documents",
+      "HTML fragments",
+      "SSE",
+      "mutations"
+    ],
+    "disconnected_shell": true,
+    "offline_post_rejected": true,
+    "absent": [
+      "cached transcript",
+      "offline send or queue",
+      "background sync",
+      "push",
+      "IndexedDB",
+      "local or session storage"
+    ]
+  },
+  "limits": [
+    "One active page at a time is an operator usage convention, not an enforced lease or client-presence protocol",
+    "No simultaneous-client coordination, shared draft, synchronized scroll, synchronized dialog state, or pixel mirroring is implemented",
+    "No physical laptop or phone is claimed; browser viewports and sequential transport contexts are labeled as such",
+    "The loopback app adds no authentication; remote access requires a separately authenticated loopback tunnel",
+    "Approval/question rendering and model selection are not part of this first vertical slice"
+  ],
+  "cutover_or_runtime_replacement_performed": false
+}
