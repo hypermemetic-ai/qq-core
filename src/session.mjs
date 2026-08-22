@@ -9,6 +9,7 @@ import { createAliasBook, defaultAliasFile, defaultLegacyAliasFile } from "./ali
 import { deriveToolEventViews, projectConversation } from "./conversation.mjs";
 import { createProjectFileService } from "./files.mjs";
 import { createLiveChairStore, defaultLiveChairsFile } from "./live-chairs.mjs";
+import { guardSessionPersistence } from "./session-persistence.mjs";
 import { createScratchManager, defaultScratchRoot } from "./scratch.mjs";
 import { createSessionScopeStore, defaultScopeFile } from "./session-scope.mjs";
 
@@ -661,7 +662,7 @@ export function createQqService(ctx, config) {
 
   const agents = ctx.get("agents");
   const sessions = ctx.get("sessions");
-  const persistence = ctx.get("sessionPersistence");
+  const persistence = guardSessionPersistence(ctx.get("sessionPersistence"));
   if (!agents || !sessions || !persistence) {
     throw new Error("qq: required DSH services are unavailable");
   }
