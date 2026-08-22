@@ -66,7 +66,9 @@ whose tree is on disk. `@hypermemetic-ai/qq` does **not** npm-depend on
 
 The host enables DSH/Cordis hot module replacement over the linked workspace.
 Changing one plugin disposes and reapplies that plugin fiber; it must not
-restart the host or dispose DSH Agents owned by another service.
+restart the host or dispose DSH Agents. qq and qq-workflows create Agents
+through the host root so a plugin replacement does not cancel in-flight
+turns. An in-flight tool from a torn-down plugin may error; the turn continues.
 
 Every sibling follows the same contract:
 

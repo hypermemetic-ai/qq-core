@@ -10,7 +10,9 @@
 
 # DSH/Cordis owns plugin-fiber reload. Watch the qq tree plus bound sibling
 # plugins; a changed plugin is disposed through its reversible effects and
-# re-applied without restarting the host or its other fibers.
+# re-applied without restarting the host or its other fibers. Agent create
+# and resume bind to the host root, so HMR must not abort in-flight turns.
+# Tools re-register on the still-living Agents; an in-flight tool may error.
 - id: hmr
   disabled: false
   config:

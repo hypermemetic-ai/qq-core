@@ -28,6 +28,19 @@ const PROJECTS_WRITE_REASON =
 // disposing the Agent itself.
 const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq/agent-handle");
 
+/**
+ * DSH binds Agent create/resume lifecycle to the accessing fiber. Plugin HMR
+ * unloads that fiber and would abort in-flight turns. Operator chairs must
+ * outlive a qq plugin replacement, so create/resume through the host root.
+ * Close remains the handle stored on the live Agent.
+ */
+export function hostAgents(ctx) {
+  const host = ctx?.root && typeof ctx.root.get === "function" ? ctx.root : ctx;
+  const agents = typeof host.get === "function" ? host.get("agents") : undefined;
+  if (agents) return agents;
+  return typeof ctx?.get === "function" ? ctx.get("agents") : undefined;
+}
+
 function freeze(value) {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     for (const child of Object.values(value)) freeze(child);
@@ -667,7 +680,7 @@ export function createQqService(ctx, config) {
     ...(config.scopeFs ? { fs: config.scopeFs } : {}),
   });
 
-  const agents = ctx.get("agents");
+  const agents = hostAgents(ctx);
   const sessions = ctx.get("sessions");
   const persistence = guardSessionPersistence(ctx.get("sessionPersistence"));
   if (!agents || !sessions || !persistence) {
@@ -1803,4 +1816,5 @@ export const internals = Object.freeze({
   canonicalPath,
   contained,
   isImmediateChild,
+  hostAgents,
 });
