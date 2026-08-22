@@ -580,7 +580,7 @@ export function attachObserve(backend, options = {}) {
                 ...(snapshot.alias ? { alias: snapshot.alias } : {}),
               }]
             : typeof backend.list === "function"
-              ? await backend.list(snapshot?.project)
+              ? await backend.list(snapshot?.project, snapshot?.folder)
               : [];
         if (snapshot?.id && !available.some((session) => session.id === snapshot.id)) {
           available.unshift({
@@ -1311,7 +1311,7 @@ export function createQqService(ctx, config) {
             context: "projects",
             ...(snapshot.alias ? { alias: snapshot.alias } : {}),
           }]
-        : await list(snapshot.project);
+        : await list(snapshot.project, snapshot.folder);
     return { ...snapshot, sessions: available };
   }
 
