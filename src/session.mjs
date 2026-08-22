@@ -770,9 +770,9 @@ export function createQqService(ctx, config) {
     }
   }
 
-  function classifyAgent(agent) {
-    if (!isRootOperatorAgent(agent)) return undefined;
-    const id = agent.session?.id;
+  function classifyWorkspace(agent) {
+    const id = agent?.session?.id;
+    if (!SESSION_ID.test(id)) return undefined;
     const cwd = agentCwd(agent);
     if (samePath(cwd, projectsRoot)) {
       return { scope: "projects", context: "projects", cwd: projectsRoot };
@@ -791,6 +791,11 @@ export function createQqService(ctx, config) {
       return { scope: "home", context: "scratch", cwd: home.path };
     }
     return undefined;
+  }
+
+  function classifyAgent(agent) {
+    if (!isRootOperatorAgent(agent)) return undefined;
+    return classifyWorkspace(agent);
   }
 
   function isUnpublished(sessionId) {
@@ -833,7 +838,9 @@ export function createQqService(ctx, config) {
   }
 
   function liveSessionIds() {
-    return liveRootAgents().map((agent) => agent.session.id);
+    return liveAgents()
+      .filter((agent) => !isUnpublished(agent.session?.id))
+      .map((agent) => agent.session.id);
   }
 
   function rememberHandle(handle) {
@@ -908,16 +915,16 @@ export function createQqService(ctx, config) {
 
   function liveAlias(sessionId) {
     if (!SESSION_ID.test(sessionId) || isUnpublished(sessionId) || !agents.get(sessionId)) return undefined;
-    if (!liveRootAgents().some((agent) => agent.session.id === sessionId)) return undefined;
     syncLive(sessionId);
     return book.aliasFor(sessionId);
   }
 
   function resolveAlias(address) {
     syncLive();
-    const exact = liveRootAgents().find((agent) => agent.session.id === address);
+    const live = liveAgents().filter((agent) => !isUnpublished(agent.session?.id));
+    const exact = live.find((agent) => agent.session.id === address);
     if (exact) return exact.session.id;
-    return liveRootAgents().find((agent) => book.aliasFor(agent.session.id) === address)?.session.id;
+    return live.find((agent) => book.aliasFor(agent.session.id) === address)?.session.id;
   }
 
   function rememberStatus(agent, status = agent?.status, at = clock()) {
@@ -932,7 +939,7 @@ export function createQqService(ctx, config) {
       const sessionId = agent?.session?.id;
       if (!SESSION_ID.test(sessionId) || isUnpublished(sessionId)) return;
       rememberStatus(agent);
-      if (isRootOperatorAgent(agent)) syncLive(sessionId);
+      syncLive(sessionId);
     });
     ctx.on("agent/status", ({ agent, status }) => {
       rememberStatus(agent, status);
