@@ -40,6 +40,7 @@
     {
       "name": "qq",
       "label": "qq",
+      "path": "qq",
       "folders": [
         { "name": "core", "label": "core", "path": "qq/core" },
         { "name": "ui", "label": "ui", "path": "qq/qq-ui" },

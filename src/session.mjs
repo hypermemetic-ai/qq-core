@@ -262,10 +262,42 @@ function listRegisteredProjects(root, registrations) {
       folders.push({ name: folderName, label: folderLabel, cwd });
     }
     if (folders.length === 0) continue;
+    let projectCwd;
+    if (typeof registration.path === "string" && registration.path.trim().length > 0) {
+      const regPath = registration.path.trim();
+      if (regPath.includes("\0")) {
+        throw new Error(`qq: project ${name} has an invalid path`);
+      }
+      const listed = isAbsolute(regPath) ? resolve(regPath) : resolve(root, regPath);
+      if (!contained(root, listed) || listed === root) {
+        throw new Error(`qq: registered project ${name} escapes projectsRoot`);
+      }
+      if (hiddenRootPath(root, listed)) continue;
+      let cwd;
+      try {
+        cwd = realpathSync(listed);
+      } catch {
+        continue;
+      }
+      if (!contained(root, cwd) || cwd === root) {
+        throw new Error(`qq: registered project ${name} escapes projectsRoot`);
+      }
+      if (hiddenRootPath(root, cwd)) continue;
+      let info;
+      try {
+        info = lstatSync(cwd);
+      } catch {
+        continue;
+      }
+      if (!info.isDirectory()) continue;
+      projectCwd = cwd;
+    } else {
+      projectCwd = folders[0].cwd;
+    }
     projects.push({
       name,
       label,
-      cwd: folders[0].cwd,
+      cwd: projectCwd,
       folders,
       grouped: configuredFolders.length > 1,
     });
@@ -600,6 +632,14 @@ export function createQqService(ctx, config) {
     }
   }
   if (!bootProject) {
+    for (const project of projects) {
+      if (project.cwd && samePath(project.cwd, bootCwd)) {
+        bootProject = { ...project, cwd: project.cwd, folder: undefined };
+        break;
+      }
+    }
+  }
+  if (!bootProject) {
     throw new Error("qq: cwd must equal one project root or registered folder");
   }
   const defaultProject = bootProject.name;
@@ -680,6 +720,11 @@ export function createQqService(ctx, config) {
     for (const project of catalog()) {
       const folder = (project.folders ?? [project]).find((entry) => samePath(entry.cwd, canonical));
       if (folder) return { ...project, cwd: folder.cwd, folder };
+    }
+    for (const project of catalog()) {
+      if (project.cwd && samePath(project.cwd, canonical)) {
+        return { ...project, cwd: project.cwd, folder: undefined };
+      }
     }
     return undefined;
   }

@@ -251,7 +251,7 @@ export function createProjectFileService(projectsRoot, listProjects, options = {
     return {
       name: project.name,
       label: project.label ?? project.name,
-      cwd: folders[0].cwd,
+      cwd: project.cwd ? canonicalDirectory(project.cwd, "project cwd") : folders[0].cwd,
       folders,
       grouped: project.grouped === true || (project.grouped === undefined && folders.length > 1),
     };
