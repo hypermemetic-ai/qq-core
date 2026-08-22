@@ -115,6 +115,10 @@ function projectsSetup(selection) {
   };
 }
 
+function homeSetup(selection) {
+  return selectionSetup(selection);
+}
+
 function httpError(status, message, code) {
   const error = new Error(message);
   error.status = status;
@@ -862,6 +866,38 @@ export function createQqService(ctx, config) {
     book.sync(ids);
   }
 
+  function chairSnapshotRow(agent) {
+    const classified = classifyAgent(agent);
+    const id = agent?.session?.id;
+    if (!classified || !SESSION_ID.test(id) || isUnpublished(id)) return undefined;
+    const row = {
+      id,
+      cwd: classified.cwd,
+      scope: classified.scope,
+      context: classified.context,
+    };
+    if (classified.scope === "project" && classified.project?.name) {
+      row.project = classified.project.name;
+    }
+    return row;
+  }
+
+  function persistLiveChairs() {
+    try {
+      const rows = [];
+      for (const agent of liveRootAgents()) {
+        const row = chairSnapshotRow(agent);
+        if (row) rows.push(row);
+      }
+      chairs.replace(rows);
+    } catch (error) {
+      ctx.logger?.warn?.("qq: live chair persist failed", {
+        file: liveChairsFile,
+        message: String(error?.message ?? error),
+      });
+    }
+  }
+
   function liveAlias(sessionId) {
     if (!SESSION_ID.test(sessionId) || isUnpublished(sessionId) || !agents.get(sessionId)) return undefined;
     if (!liveRootAgents().some((agent) => agent.session.id === sessionId)) return undefined;
@@ -896,6 +932,8 @@ export function createQqService(ctx, config) {
     ctx.on("agent/disposed", (event = {}) => {
       const sessionId = event.agent?.session?.id;
       if (SESSION_ID.test(sessionId)) statusSince.delete(sessionId);
+      // Host shutdown disposes every Agent. That is not operator close — do
+      // not persist an empty live-chair set here or restore will always be empty.
       syncLive();
     });
   }
@@ -980,36 +1018,103 @@ export function createQqService(ctx, config) {
     };
   }
 
+  async function resumeChair(sessionId, header) {
+    const cwd = header?.cwd;
+    const isProjects = samePath(cwd, projectsRoot);
+    const project = projectForCwd(cwd);
+    const setup = isProjects
+      ? projectsSetup({ current: selectedModel })
+      : project
+        ? selectionSetup({ current: selectedModel })
+        : homeSetup({ current: selectedModel });
+    const handle = rememberHandle(await agents.resume({
+      resumeSessionId: sessionId,
+      agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
+      setup,
+    }));
+    await ctx.get("loader")?.await();
+    if (isProjects) fencedProjects.add(handle.agent ?? handle);
+    syncLive(sessionId);
+    return handle.agent ?? handle;
+  }
+
+  function restoreSkipReason(planned, header) {
+    if (!header) return "missing-persistence";
+    const cwd = header.cwd;
+    if (typeof cwd !== "string") return "missing-cwd";
+    const isProjects = samePath(cwd, projectsRoot);
+    const project = projectForCwd(cwd);
+    if (planned.scope === "project" && !project) return "missing-project";
+    if (planned.scope === "projects" && !isProjects) return "missing-cwd";
+    if (planned.scope === "home") {
+      const home = homeWorkspace(planned.id);
+      if (!home || !samePath(cwd, home.path)) return "missing-cwd";
+      return undefined;
+    }
+    if (!isProjects && !project) return "missing-project";
+    return undefined;
+  }
+
+  async function restorePlannedChairs() {
+    if (restoreDone) return;
+    restoreDone = true;
+    if (!chairs.corrupt) {
+      try {
+        const headers = await persistedHeaders();
+        const byId = new Map(headers.map((header) => [header.id, header]));
+        for (const planned of plannedChairs) {
+          if (requireLiveAgent(planned.id)) continue;
+          const header = byId.get(planned.id);
+          if (restoreSkipReason(planned, header)) continue;
+          try {
+            await resumeChair(planned.id, header);
+          } catch (error) {
+            ctx.logger?.warn?.("qq: live chair restore failed", {
+              sessionId: planned.id,
+              message: String(error?.message ?? error),
+            });
+          }
+        }
+      } catch (error) {
+        ctx.logger?.warn?.("qq: live chair restore failed", {
+          message: String(error?.message ?? error),
+        });
+      }
+    }
+    persistLiveChairs();
+  }
+
   async function ensureBootSession() {
     if (requireLiveAgent(defaultSessionId)) {
       syncLive(defaultSessionId);
-      return;
+    } else {
+      await ctx.get("loader")?.await();
+      if (requireLiveAgent(defaultSessionId)) {
+        syncLive(defaultSessionId);
+      } else {
+        const headers = await persistedHeaders();
+        const persisted = headers.find((header) => header.id === defaultSessionId);
+        const setup = selectionSetup({ current: selectedModel });
+        const options = {
+          agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
+          setup,
+        };
+        const persistCwd = typeof persisted?.cwd === "string" ? persisted.cwd : undefined;
+        const persistProject = persistCwd ? projectForCwd(persistCwd) : undefined;
+        const handle = rememberHandle(persisted && persistProject
+          ? await agents.resume({ resumeSessionId: defaultSessionId, ...options })
+          : await agents.create({
+              sessionId: defaultSessionId,
+              meta: { cwd: bootProject.cwd },
+              ...options,
+            }));
+        if (!persisted || !persistProject) {
+          await sessions.flush(handle.agent.session);
+        }
+        syncLive(handle.agent.session.id);
+      }
     }
-    await ctx.get("loader")?.await();
-    if (requireLiveAgent(defaultSessionId)) {
-      syncLive(defaultSessionId);
-      return;
-    }
-    const headers = await persistedHeaders();
-    const persisted = headers.find((header) => header.id === defaultSessionId);
-    const setup = selectionSetup({ current: selectedModel });
-    const options = {
-      agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
-      setup,
-    };
-    const persistCwd = typeof persisted?.cwd === "string" ? persisted.cwd : undefined;
-    const persistProject = persistCwd ? projectForCwd(persistCwd) : undefined;
-    const handle = rememberHandle(persisted && persistProject
-      ? await agents.resume({ resumeSessionId: defaultSessionId, ...options })
-      : await agents.create({
-          sessionId: defaultSessionId,
-          meta: { cwd: bootProject.cwd },
-          ...options,
-        }));
-    if (!persisted || !persistProject) {
-      await sessions.flush(handle.agent.session);
-    }
-    syncLive(handle.agent.session.id);
+    await restorePlannedChairs();
   }
 
   async function reconcileHomeScratch() {
@@ -1220,6 +1325,7 @@ export function createQqService(ctx, config) {
     await sessions.flush(handle.agent.session);
     const createdId = handle.agent.session.id;
     syncLive(createdId);
+    persistLiveChairs();
     const alias = book.aliasFor(createdId);
     const folder = (project.folders ?? []).find((entry) => entry.cwd === cwd);
     return {
@@ -1275,6 +1381,7 @@ export function createQqService(ctx, config) {
     unpublished.delete(sessionId);
     const createdId = handle.agent.session.id;
     syncLive(createdId);
+    persistLiveChairs();
     const alias = book.aliasFor(createdId);
     return {
       id: createdId,
@@ -1298,6 +1405,7 @@ export function createQqService(ctx, config) {
     if (live) {
       fenceProjectsAgent(live);
       syncLive(live.session.id);
+      persistLiveChairs();
       const alias = book.aliasFor(live.session.id);
       return {
         id: live.session.id,
@@ -1325,6 +1433,7 @@ export function createQqService(ctx, config) {
     const createdId = handle.agent.session.id;
     fencedProjects.add(handle.agent);
     syncLive(createdId);
+    persistLiveChairs();
     const alias = book.aliasFor(createdId);
     return {
       id: createdId,
@@ -1346,6 +1455,7 @@ export function createQqService(ctx, config) {
     agentPromises.delete(sessionId);
     try { delete agent?.[AGENT_HANDLE]; } catch {}
     syncLive();
+    persistLiveChairs();
   }
 
   async function reopen(sessionId) {
@@ -1356,26 +1466,8 @@ export function createQqService(ctx, config) {
     const headers = await persistedHeaders();
     const header = headers.find((h) => h.id === sessionId);
     if (!header) throw httpError(404, NOT_FOUND);
-    const cwd = header.cwd;
-    const isProjects = samePath(cwd, projectsRoot);
-    const project = projectForCwd(cwd);
-    const setup = isProjects
-      ? projectsSetup({ current: selectedModel })
-      : project
-        ? selectionSetup({ current: selectedModel })
-        : homeSetup({ current: selectedModel });
-    const options = {
-      agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
-      setup,
-    };
-    const handle = rememberHandle(await agents.resume({
-      resumeSessionId: sessionId,
-      ...options,
-    }));
-    await ctx.get("loader")?.await();
-    if (isProjects) fencedProjects.add(handle.agent ?? handle);
-    syncLive(sessionId);
-    const agent = handle.agent ?? handle;
+    const agent = await resumeChair(sessionId, header);
+    persistLiveChairs();
     return rowFor(agent);
   }
 
