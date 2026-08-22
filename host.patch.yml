@@ -16,9 +16,30 @@
 - id: hmr
   disabled: false
   config:
+    base: !!js process.env.QQ_DSH_CWD ?? process.cwd()
     # bin/qq exports the exact linked roots discovered by its generic sibling
     # scan. Direct DSH boots fall back to the current workspace only.
     root: !!js (process.env.QQ_DSH_HMR_ROOTS ?? process.cwd()).split(':').filter(Boolean)
+    ignored:
+      - '**/node_modules/**'
+      - '**/.git/**'
+      - '**/.worktrees/**'
+      - '**/.*'
+      - '**/.*/**'
+      - '**/dist/**'
+      - '**/build/**'
+      - '../**/node_modules/**'
+      - '../**/.git/**'
+      - '../**/.worktrees/**'
+      - '../**/.*'
+      - '../**/.*/**'
+      - '../../**/node_modules/**'
+      - '../../**/.git/**'
+      - '../../**/.worktrees/**'
+      - '../../**/.*'
+      - '../../**/.*/**'
+      - 'cache'
+      - 'data'
 
 # Architect owns fold on this profile. compact-basic must not auto-summarize
 # the talking session; qq-workflows chops fat tool dumps and folds by notes.
