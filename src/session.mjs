@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { makeAgentRow, orderAgents } from "./agent-catalog.mjs";
 import { createAliasBook, defaultAliasFile, defaultLegacyAliasFile } from "./alias.mjs";
-import { deriveToolEventViews, projectConversation } from "./conversation.mjs";
+import { applyAssistantChunk, deriveToolEventViews, projectConversation } from "./conversation.mjs";
 import { createProjectFileService } from "./files.mjs";
 import { createLiveChairStore, defaultLiveChairsFile } from "./live-chairs.mjs";
 import { guardSessionPersistence } from "./session-persistence.mjs";
@@ -692,6 +692,8 @@ export function createQqService(ctx, config) {
   const unpublished = new Set();
   const fencedProjects = new WeakSet();
   const statusSince = new Map();
+  const projections = new Map();
+  const sessionObservers = new Map();
   const defaultCreatedAt = Date.now();
   const clock = typeof config.now === "function" ? config.now : Date.now;
   const aliasFile = config.aliasFile !== undefined || envHasDshHome()
@@ -959,7 +961,10 @@ export function createQqService(ctx, config) {
     });
     ctx.on("agent/disposed", (event = {}) => {
       const sessionId = event.agent?.session?.id;
-      if (SESSION_ID.test(sessionId)) statusSince.delete(sessionId);
+      if (SESSION_ID.test(sessionId)) {
+        statusSince.delete(sessionId);
+        projections.delete(sessionId);
+      }
       // Host shutdown disposes every Agent. That is not operator close — do
       // not persist an empty live-chair set here or restore will always be empty.
       syncLive();
@@ -1217,26 +1222,9 @@ export function createQqService(ctx, config) {
     return rows[0] ?? null;
   }
 
-  async function read(sessionId) {
-    await boot;
-    const agent = await liveAgent(sessionId);
+  function decorateSnapshot(agent, conversation, events) {
     const row = rowFor(agent);
     const alias = liveAlias(agent.session.id);
-    const events = agent.session.events;
-    let toolViews;
-    try {
-      const tools = ctx.get("tools", false);
-      toolViews = deriveToolEventViews(events, tools, agent, (error, event) => {
-        ctx.logger?.warn?.(`qq: tool presenter failed at seq ${String(event?.seq)}: ${String(error)}`);
-      });
-    } catch {
-      // Tool presentation is optional. Raw call/result content remains complete.
-    }
-    const conversation = projectConversation(events, {
-      seedLength: agent.session.header?.seedLength,
-      inbox: agent.inbox,
-      toolViews,
-    });
     return {
       id: agent.session.id,
       events,
@@ -1255,6 +1243,40 @@ export function createQqService(ctx, config) {
       ...(row.folder ? { folder: row.folder, folderLabel: row.folderLabel } : {}),
       ...(alias ? { alias } : {}),
     };
+  }
+
+  function rememberProjection(agent, conversation, events, snapshot) {
+    const sessionId = agent.session.id;
+    const lastSeq = events.at(-1)?.seq;
+    projections.set(sessionId, {
+      agent,
+      seq: Number.isSafeInteger(lastSeq) ? lastSeq + 1 : agent.session.seq,
+      conversation,
+      events,
+      snapshot,
+    });
+    return snapshot;
+  }
+
+  async function read(sessionId) {
+    await boot;
+    const agent = await liveAgent(sessionId);
+    const events = agent.session.events;
+    let toolViews;
+    try {
+      const tools = ctx.get("tools", false);
+      toolViews = deriveToolEventViews(events, tools, agent, (error, event) => {
+        ctx.logger?.warn?.(`qq: tool presenter failed at seq ${String(event?.seq)}: ${String(error)}`);
+      });
+    } catch {
+      // Tool presentation is optional. Raw call/result content remains complete.
+    }
+    const conversation = projectConversation(events, {
+      seedLength: agent.session.header?.seedLength,
+      inbox: agent.inbox,
+      toolViews,
+    });
+    return rememberProjection(agent, conversation, events, decorateSnapshot(agent, conversation, events));
   }
 
   async function inspect(sessionId) {
@@ -1332,7 +1354,10 @@ export function createQqService(ctx, config) {
             ...(snapshot.alias ? { alias: snapshot.alias } : {}),
           }]
         : await list(snapshot.project);
-    return { ...snapshot, sessions: available };
+    const next = { ...snapshot, sessions: available };
+    const cached = projections.get(sessionId);
+    if (cached) cached.snapshot = next;
+    return next;
   }
 
   async function createAt(projectName, folderCwd) {
@@ -1612,6 +1637,78 @@ export function createQqService(ctx, config) {
     return replaceProject(sessionId, classified.project);
   }
 
+  function observersFor(sessionId) {
+    return sessionObservers.get(sessionId);
+  }
+
+  function notifySession(sessionId, snapshot) {
+    const listeners = observersFor(sessionId);
+    if (!listeners) return;
+    for (const listener of listeners) {
+      try { listener(null, snapshot); } catch {}
+    }
+  }
+
+  function notifySessionError(sessionId, error) {
+    const listeners = observersFor(sessionId);
+    if (!listeners) return;
+    for (const listener of listeners) {
+      try { listener(error); } catch {}
+    }
+  }
+
+  function rebuildAndNotify(sessionId) {
+    projections.delete(sessionId);
+    if (!observersFor(sessionId)) return;
+    void view(sessionId).then(
+      (snapshot) => notifySession(sessionId, snapshot),
+      (error) => notifySessionError(sessionId, error),
+    );
+  }
+
+  if (typeof ctx.on === "function") {
+    ctx.on("session/event", (session, event) => {
+      const sessionId = session?.id;
+      if (!SESSION_ID.test(sessionId)) return;
+      const cached = projections.get(sessionId);
+      if (event?.type === "assistant/chunk" && cached && cached.seq === event.seq) {
+        const conversation = applyAssistantChunk(cached.conversation, event);
+        if (conversation) {
+          const agent = agents.get(sessionId) ?? cached.agent;
+          const events = cached.events.concat(event);
+          const snapshot = {
+            ...cached.snapshot,
+            conversation,
+            events,
+            agentStatus: agent?.status ?? cached.snapshot.agentStatus,
+          };
+          projections.set(sessionId, {
+            agent,
+            seq: event.seq + 1,
+            conversation,
+            events,
+            snapshot,
+          });
+          notifySession(sessionId, snapshot);
+          return;
+        }
+      }
+      rebuildAndNotify(sessionId);
+    });
+    ctx.on("agent/status", ({ agent }) => {
+      const sessionId = agent?.session?.id;
+      if (!SESSION_ID.test(sessionId) || !observersFor(sessionId)) return;
+      const cached = projections.get(sessionId);
+      if (cached) {
+        const snapshot = { ...cached.snapshot, agentStatus: agent.status };
+        cached.snapshot = snapshot;
+        notifySession(sessionId, snapshot);
+        return;
+      }
+      rebuildAndNotify(sessionId);
+    });
+  }
+
   return Object.freeze({
     defaultSessionId,
     defaultProject,
@@ -1797,7 +1894,72 @@ export function createQqService(ctx, config) {
     },
     close,
     observe(sessionId, listener, options = {}) {
-      return observeSnapshot(() => view(sessionId), listener, options);
+      if (typeof listener !== "function") {
+        throw new Error("qq: observe requires a listener");
+      }
+      if (typeof ctx.on !== "function") {
+        return observeSnapshot(() => view(sessionId), listener, options);
+      }
+      const intervalMs = options.intervalMs ?? DEFAULT_OBSERVE_MS;
+      if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) {
+        throw new Error("qq: observe intervalMs must be a positive integer");
+      }
+      let listeners = sessionObservers.get(sessionId);
+      if (!listeners) {
+        listeners = new Set();
+        sessionObservers.set(sessionId, listeners);
+      }
+      listeners.add(listener);
+      let cancelled = false;
+      let timer;
+      let cheapFp;
+      void view(sessionId).then(
+        (snapshot) => {
+          if (cancelled || !listeners.has(listener)) return;
+          cheapFp = `${snapshot.agentStatus ?? ""}:${projections.get(sessionId)?.seq ?? ""}`;
+          try { listener(null, snapshot); } catch {}
+        },
+        (error) => {
+          if (cancelled || !listeners.has(listener)) return;
+          try { listener(error); } catch {}
+        },
+      );
+      const tick = async () => {
+        if (cancelled) return;
+        try {
+          await boot;
+          if (cancelled) return;
+          const agent = requireLiveAgent(sessionId);
+          const fp = `${agent?.status ?? ""}:${agent?.session?.seq ?? ""}`;
+          const cached = projections.get(sessionId);
+          const liveSeq = agent?.session?.seq;
+          const seqCurrent = liveSeq == null || cached.seq === liveSeq;
+          const current = Boolean(cached && seqCurrent && cached.snapshot?.agentStatus === agent.status);
+          if (fp !== cheapFp && !current) {
+            cheapFp = fp;
+            const snapshot = await view(sessionId);
+            if (!cancelled && listeners.has(listener)) {
+              try { listener(null, snapshot); } catch {}
+            }
+          } else {
+            cheapFp = fp;
+          }
+        } catch (error) {
+          if (!cancelled && listeners.has(listener)) {
+            try { listener(error); } catch {}
+          }
+        }
+        if (cancelled) return;
+        timer = setTimeout(tick, intervalMs);
+        timer.unref?.();
+      };
+      void tick();
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+        listeners.delete(listener);
+        if (listeners.size === 0) sessionObservers.delete(sessionId);
+      };
     },
   });
 }

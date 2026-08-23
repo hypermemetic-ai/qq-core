@@ -50,6 +50,62 @@ function normalizedAssistantBlocks(blocks) {
   return asArray(blocks).map(normalizedAssistantBlock).filter(Boolean);
 }
 
+/**
+ * Apply one `assistant/chunk` onto a conversation view. Matches the fold's
+ * streaming node. Returns null when the event is not a chunk.
+ */
+export function applyAssistantChunk(conversation, event) {
+  if (!conversation || typeof conversation !== "object" || event?.type !== "assistant/chunk") {
+    return null;
+  }
+  const data = event.data ?? {};
+  const chunk = data.chunk ?? {};
+  const turn = Number(data.turn ?? 0);
+  const step = Number(data.step ?? 0);
+  const nodes = Array.isArray(conversation.nodes) ? conversation.nodes.slice() : [];
+  const pending = Array.isArray(conversation.pending) ? conversation.pending : [];
+  const tail = nodes.at(-1);
+  const live = tail?.kind === "assistant"
+    && tail.status === "streaming"
+    && Number(tail.turn) === turn
+    && Number(tail.step) === step;
+  const blocks = live && Array.isArray(tail.blocks)
+    ? tail.blocks.map((block) => (block && typeof block === "object" ? { ...block } : block))
+    : [];
+  if (chunk.type === "block-start") {
+    if (chunk.blockType === "text" || chunk.blockType === "reasoning") {
+      blocks[chunk.index] = { type: chunk.blockType, text: "" };
+    }
+  } else if (chunk.type === "text-delta" || chunk.type === "reasoning-delta") {
+    const type = chunk.type === "text-delta" ? "text" : "reasoning";
+    const previous = blocks[chunk.index];
+    blocks[chunk.index] = {
+      type,
+      text: (previous?.type === type ? asText(previous.text) : "") + asText(chunk.text),
+    };
+  } else if (chunk.type === "block-end") {
+    blocks[chunk.index] = chunk.block;
+  }
+  const visible = blocks.map(normalizedAssistantBlock).filter(Boolean);
+  if (visible.length === 0) {
+    if (live) nodes.pop();
+    return { nodes, pending };
+  }
+  const next = {
+    kind: "assistant",
+    key: `assistant:${turn}:${step}`,
+    seq: live ? tail.seq : event.seq,
+    time: live ? tail.time : event.time,
+    turn,
+    step,
+    status: "streaming",
+    blocks: visible,
+  };
+  if (live) nodes[nodes.length - 1] = next;
+  else nodes.push(next);
+  return { nodes, pending };
+}
+
 function eventView(toolViews, event) {
   const supplied = toolViews instanceof Map
     ? toolViews.get(event.seq)
@@ -179,8 +235,9 @@ export function deriveToolEventViews(events, tools, scope, onError = () => {}) {
 
 /**
  * Fold DSH events plus the live durable-inbox projection into one deterministic
- * conversation view. This is a pure rebuild on every read, not a transcript
- * store; events, message ids, and inbox splices remain DSH-owned.
+ * conversation view. The rebuild remains the authority; live token growth may
+ * apply `assistant/chunk` onto a cached fold. Events, message ids, and inbox
+ * splices remain DSH-owned.
  */
 export function projectConversation(events, options = {}) {
   const sourceEvents = asArray(events);
@@ -677,4 +734,5 @@ export const internals = Object.freeze({
   normalizedAssistantBlocks,
   resultCallId,
   terminalFailed,
+  applyAssistantChunk,
 });
