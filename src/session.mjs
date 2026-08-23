@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { makeAgentRow, orderAgents } from "./agent-catalog.mjs";
 import { createAliasBook, defaultAliasFile, defaultLegacyAliasFile } from "./alias.mjs";
-import { applyAssistantChunk, deriveToolEventViews, projectConversation } from "./conversation.mjs";
+import { applyConversationEvent, deriveToolEventViews, projectConversation } from "./conversation.mjs";
 import { createProjectFileService } from "./files.mjs";
 import { createLiveChairStore, defaultLiveChairsFile } from "./live-chairs.mjs";
 import { guardSessionPersistence } from "./session-persistence.mjs";
@@ -1245,12 +1245,18 @@ export function createQqService(ctx, config) {
     };
   }
 
+  function projectionSeq(agent, events = agent?.session?.events) {
+    if (Number.isSafeInteger(agent?.session?.seq)) return agent.session.seq;
+    const lastSeq = Array.isArray(events) ? events.at(-1)?.seq : undefined;
+    if (Number.isSafeInteger(lastSeq)) return lastSeq + 1;
+    return Array.isArray(events) ? events.length : 0;
+  }
+
   function rememberProjection(agent, conversation, events, snapshot) {
     const sessionId = agent.session.id;
-    const lastSeq = events.at(-1)?.seq;
     projections.set(sessionId, {
       agent,
-      seq: Number.isSafeInteger(lastSeq) ? lastSeq + 1 : agent.session.seq,
+      seq: projectionSeq(agent, events),
       conversation,
       events,
       snapshot,
@@ -1261,6 +1267,14 @@ export function createQqService(ctx, config) {
   async function read(sessionId) {
     await boot;
     const agent = await liveAgent(sessionId);
+    const cached = projections.get(sessionId);
+    const liveSeq = projectionSeq(agent);
+    if (cached && cached.agent === agent && cached.seq === liveSeq && cached.snapshot) {
+      if (cached.snapshot.agentStatus === agent.status) return cached.snapshot;
+      const snapshot = { ...cached.snapshot, agentStatus: agent.status };
+      cached.snapshot = snapshot;
+      return snapshot;
+    }
     const events = agent.session.events;
     let toolViews;
     try {
@@ -1657,13 +1671,33 @@ export function createQqService(ctx, config) {
     }
   }
 
+  const rebuilds = new Map();
+
   function rebuildAndNotify(sessionId) {
-    projections.delete(sessionId);
-    if (!observersFor(sessionId)) return;
-    void view(sessionId).then(
-      (snapshot) => notifySession(sessionId, snapshot),
-      (error) => notifySessionError(sessionId, error),
+    if (!observersFor(sessionId)) {
+      projections.delete(sessionId);
+      return;
+    }
+    if (rebuilds.has(sessionId)) {
+      rebuilds.set(sessionId, true);
+      return;
+    }
+    rebuilds.set(sessionId, false);
+    const run = () => view(sessionId).then(
+      (snapshot) => {
+        if (rebuilds.get(sessionId) === true) {
+          rebuilds.set(sessionId, false);
+          return run();
+        }
+        rebuilds.delete(sessionId);
+        notifySession(sessionId, snapshot);
+      },
+      (error) => {
+        rebuilds.delete(sessionId);
+        notifySessionError(sessionId, error);
+      },
     );
+    void run();
   }
 
   if (typeof ctx.on === "function") {
@@ -1671,10 +1705,10 @@ export function createQqService(ctx, config) {
       const sessionId = session?.id;
       if (!SESSION_ID.test(sessionId)) return;
       const cached = projections.get(sessionId);
-      if (event?.type === "assistant/chunk" && cached && cached.seq === event.seq) {
-        const conversation = applyAssistantChunk(cached.conversation, event);
+      if (cached && cached.seq === event.seq) {
+        const agent = agents.get(sessionId) ?? cached.agent;
+        const conversation = applyConversationEvent(cached.conversation, event, agent?.inbox);
         if (conversation) {
-          const agent = agents.get(sessionId) ?? cached.agent;
           const events = cached.events.concat(event);
           const snapshot = {
             ...cached.snapshot,
@@ -1930,11 +1964,10 @@ export function createQqService(ctx, config) {
           await boot;
           if (cancelled) return;
           const agent = requireLiveAgent(sessionId);
-          const fp = `${agent?.status ?? ""}:${agent?.session?.seq ?? ""}`;
+          const liveSeq = projectionSeq(agent);
+          const fp = `${agent?.status ?? ""}:${liveSeq}`;
           const cached = projections.get(sessionId);
-          const liveSeq = agent?.session?.seq;
-          const seqCurrent = liveSeq == null || cached.seq === liveSeq;
-          const current = Boolean(cached && seqCurrent && cached.snapshot?.agentStatus === agent.status);
+          const current = Boolean(cached && cached.seq === liveSeq && cached.snapshot?.agentStatus === agent.status);
           if (fp !== cheapFp && !current) {
             cheapFp = fp;
             const snapshot = await view(sessionId);

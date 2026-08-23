@@ -50,6 +50,31 @@ function normalizedAssistantBlocks(blocks) {
   return asArray(blocks).map(normalizedAssistantBlock).filter(Boolean);
 }
 
+export function pendingFromInbox(inbox) {
+  const pendingState = inbox && (Array.isArray(inbox.nextTurn) || Array.isArray(inbox.nextStep))
+    ? inboxSnapshot(inbox)
+    : {
+        "next-turn": asArray(inbox?.["next-turn"]),
+        "next-step": asArray(inbox?.["next-step"]),
+      };
+  const pending = [];
+  for (const target of ["next-step", "next-turn"]) {
+    for (const entry of pendingState[target]) {
+      const message = entry?.message ?? entry;
+      if (!directHuman(message)) continue;
+      pending.push({
+        id: String(message?.id ?? ""),
+        target,
+        placement: target === "next-step" ? "steering" : "queued",
+        message,
+        text: messageText(message).slice(0, TEXT_LIMIT),
+        editable: editableMessage(message),
+      });
+    }
+  }
+  return pending;
+}
+
 /**
  * Apply one `assistant/chunk` onto a conversation view. Matches the fold's
  * streaming node. Returns null when the event is not a chunk.
@@ -104,6 +129,120 @@ export function applyAssistantChunk(conversation, event) {
   if (live) nodes[nodes.length - 1] = next;
   else nodes.push(next);
   return { nodes, pending };
+}
+
+export function applyUserMessage(conversation, event) {
+  if (!conversation || typeof conversation !== "object" || event?.type !== "user/message") {
+    return null;
+  }
+  const nodes = Array.isArray(conversation.nodes) ? conversation.nodes.slice() : [];
+  const pending = Array.isArray(conversation.pending) ? conversation.pending : [];
+  const message = event.data ?? {};
+  if (event.surfaceOp && typeof event.surfaceOp === "object") return null;
+  if (event.surfaceOp !== "append") return { nodes, pending };
+  if (!directHuman(message)) {
+    nodes.push({
+      kind: "context",
+      key: `context:${event.seq}`,
+      seq: event.seq,
+      time: event.time,
+      source: message?.source ?? { kind: "unknown" },
+      content: asArray(message?.content),
+    });
+    return { nodes, pending };
+  }
+  const id = String(message?.id ?? "");
+  const index = id
+    ? nodes.findLastIndex((node) => node?.messageId === id && (node.kind === "user" || node.kind === "steering"))
+    : -1;
+  if (index >= 0) {
+    const existing = nodes[index];
+    nodes[index] = {
+      ...existing,
+      seq: event.seq,
+      time: event.time,
+      content: asArray(message?.content),
+      claimed: false,
+      durable: true,
+    };
+    return { nodes, pending };
+  }
+  nodes.push({
+    kind: "user",
+    key: `user:${event.seq}`,
+    seq: event.seq,
+    time: event.time,
+    messageId: id,
+    content: asArray(message?.content),
+  });
+  return { nodes, pending };
+}
+
+export function applyAssistantSeal(conversation, event) {
+  if (!conversation || typeof conversation !== "object" || event?.type !== "assistant/message") {
+    return null;
+  }
+  const nodes = Array.isArray(conversation.nodes) ? conversation.nodes.slice() : [];
+  const pending = Array.isArray(conversation.pending) ? conversation.pending : [];
+  if (event.surfaceOp !== "append") return { nodes, pending };
+  const data = event.data ?? {};
+  const turn = Number(data.turn ?? 0);
+  const step = Number(data.step ?? 0);
+  const tail = nodes.at(-1);
+  const live = tail?.kind === "assistant"
+    && Number(tail.turn) === turn
+    && Number(tail.step) === step;
+  const blocks = normalizedAssistantBlocks(asArray(data.message?.content));
+  const next = {
+    kind: "assistant",
+    key: `assistant:${turn}:${step}`,
+    seq: live ? tail.seq : event.seq,
+    time: live ? tail.time : event.time,
+    turn,
+    step,
+    status: "settled",
+    blocks,
+  };
+  if (live) nodes[nodes.length - 1] = next;
+  else nodes.push(next);
+  return { nodes, pending };
+}
+
+const TRANSCRIPT_NEUTRAL = new Set(["turn/start", "turn/end", "step/start", "step/end"]);
+
+/**
+ * Apply one session event onto a conversation view. Returns null when the
+ * caller must rebuild from the log.
+ */
+export function applyConversationEvent(conversation, event, inbox) {
+  if (!conversation || typeof conversation !== "object" || !event || typeof event !== "object") {
+    return null;
+  }
+  let next;
+  switch (event.type) {
+    case "assistant/chunk":
+      next = applyAssistantChunk(conversation, event);
+      break;
+    case "user/message":
+      next = applyUserMessage(conversation, event);
+      break;
+    case "assistant/message":
+      next = applyAssistantSeal(conversation, event);
+      break;
+    case "agent/inbox/spliced":
+      next = {
+        nodes: Array.isArray(conversation.nodes) ? conversation.nodes : [],
+        pending: conversation.pending,
+      };
+      break;
+    default:
+      next = TRANSCRIPT_NEUTRAL.has(event.type) || event.surfaceOp !== "append"
+        ? conversation
+        : null;
+  }
+  if (!next) return null;
+  if (inbox !== undefined) return { nodes: next.nodes, pending: pendingFromInbox(inbox) };
+  return next;
 }
 
 function eventView(toolViews, event) {
@@ -705,24 +844,7 @@ export function projectConversation(events, options = {}) {
     }
   }
 
-  const pendingState = options.inbox ? inboxSnapshot(options.inbox) : inbox;
-  const pending = [];
-  for (const target of ["next-step", "next-turn"]) {
-    for (const entry of pendingState[target]) {
-      const message = entry?.message ?? entry;
-      if (!directHuman(message)) continue;
-      pending.push({
-        id: String(message?.id ?? ""),
-        target,
-        placement: target === "next-step" ? "steering" : "queued",
-        message,
-        text: messageText(message).slice(0, TEXT_LIMIT),
-        editable: editableMessage(message),
-      });
-    }
-  }
-
-  return { nodes, pending };
+  return { nodes, pending: pendingFromInbox(options.inbox ?? inbox) };
 }
 
 export const internals = Object.freeze({
@@ -735,4 +857,8 @@ export const internals = Object.freeze({
   resultCallId,
   terminalFailed,
   applyAssistantChunk,
+  applyAssistantSeal,
+  applyConversationEvent,
+  applyUserMessage,
+  pendingFromInbox,
 });

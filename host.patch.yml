@@ -21,9 +21,10 @@
     # scan. Direct DSH boots fall back to the current workspace only.
     root: !!js (process.env.QQ_DSH_HMR_ROOTS ?? process.cwd()).split(':').filter(Boolean)
     ignored:
+      - '.worktrees/**'
+      - '**/.worktrees/**'
       - '**/node_modules/**'
       - '**/.git/**'
-      - '**/.worktrees/**'
       - '**/.*'
       - '**/.*/**'
       - '**/dist/**'
