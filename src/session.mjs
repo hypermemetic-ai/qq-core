@@ -593,7 +593,7 @@ export function attachObserve(backend, options = {}) {
                 ...(snapshot.alias ? { alias: snapshot.alias } : {}),
               }]
             : typeof backend.list === "function"
-              ? await backend.list(snapshot?.project)
+              ? await backend.list(snapshot?.project, snapshot?.folder ?? "")
               : [];
         if (snapshot?.id && !available.some((session) => session.id === snapshot.id)) {
           available.unshift({
@@ -602,6 +602,7 @@ export function attachObserve(backend, options = {}) {
             ...(snapshot.scope ? { scope: snapshot.scope } : {}),
             ...(snapshot.context ? { context: snapshot.context } : {}),
             ...(snapshot.project ? { project: snapshot.project } : {}),
+            ...(snapshot.folder ? { folder: snapshot.folder } : {}),
           });
         }
         return { ...snapshot, sessions: available };
@@ -1195,9 +1196,10 @@ export function createQqService(ctx, config) {
     const wanted = projectName === undefined || projectName === null || projectName === ""
       ? undefined
       : projectByName(String(projectName));
-    const wantedFolder = folderName === undefined || folderName === null || folderName === ""
-      ? undefined
-      : String(folderName);
+    const folderSpecified = !(folderName === undefined || folderName === null);
+    const wantedFolder = folderSpecified && folderName !== ""
+      ? String(folderName)
+      : undefined;
     if (wantedFolder) {
       if (!wanted) throw httpError(404, "qq: project not found");
       if (!(wanted.folders ?? []).some((folder) => folder.name === wantedFolder)) {
@@ -1206,8 +1208,13 @@ export function createQqService(ctx, config) {
     }
     const rows = liveProjectAgents()
       .map((agent) => rowFor(agent))
-      .filter((row) => row.project && (!wanted || row.project === wanted.name)
-        && (!wantedFolder || row.folder === wantedFolder));
+      .filter((row) => {
+        if (!row.project) return false;
+        if (wanted && row.project !== wanted.name) return false;
+        if (!folderSpecified) return true;
+        if (wantedFolder) return row.folder === wantedFolder;
+        return !row.folder;
+      });
     return sortRows(rows);
   }
 
@@ -1427,7 +1434,7 @@ export function createQqService(ctx, config) {
             context: "projects",
             ...(snapshot.alias ? { alias: snapshot.alias } : {}),
           }]
-        : await list(snapshot.project);
+        : await list(snapshot.project, snapshot.folder ?? "");
     const next = { ...snapshot, sessions: available };
     const cached = projections.get(sessionId);
     if (cached) cached.snapshot = next;
@@ -1599,7 +1606,8 @@ export function createQqService(ctx, config) {
   }
 
   async function closeProject(sessionId, project) {
-    const remainingBefore = await list(project?.name);
+    const folderName = project?.grouped ? (project.folder?.name ?? "") : "";
+    const remainingBefore = await list(project?.name, folderName);
     await disposeLive(sessionId);
     const remaining = remainingBefore.filter((row) => row.id !== sessionId);
     const next = remaining[0];
@@ -1609,6 +1617,7 @@ export function createQqService(ctx, config) {
       scope: "project",
       context: "project",
       project: project?.name ?? defaultProject,
+      ...(project?.grouped && project.folder?.name ? { folder: project.folder.name } : {}),
     };
   }
 
