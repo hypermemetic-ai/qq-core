@@ -1222,6 +1222,65 @@ export function createQqService(ctx, config) {
     return rows[0] ?? null;
   }
 
+  function turnStatusFromEvents(events) {
+    let openTurn;
+    let lastEnd;
+    const list = Array.isArray(events) ? events : [];
+    for (const event of list) {
+      if (event?.type === "turn/start") openTurn = event.data?.turn;
+      if (event?.type === "turn/end") {
+        if (openTurn === event.data?.turn) openTurn = undefined;
+        lastEnd = event.data?.reason;
+      }
+    }
+    return { openTurn, lastEnd };
+  }
+
+  function applyTurnStatus(status, event) {
+    if (event?.type === "turn/start") {
+      return { openTurn: event.data?.turn, lastEnd: status?.lastEnd };
+    }
+    if (event?.type === "turn/end") {
+      return {
+        openTurn: status?.openTurn === event.data?.turn ? undefined : status?.openTurn,
+        lastEnd: event.data?.reason,
+      };
+    }
+    return status ?? {};
+  }
+
+  function toolViewsFor(event, agent, conversation) {
+    if (event?.type !== "tool/call" && event?.type !== "tool/result") return undefined;
+    try {
+      const tools = ctx.get("tools", false);
+      if (!tools) return undefined;
+      const window = [event];
+      if (event.type === "tool/result") {
+        const callId = String(
+          event.data?.message?.source?.callId
+          ?? event.data?.callId
+          ?? "",
+        );
+        const nodes = Array.isArray(conversation?.nodes) ? conversation.nodes : [];
+        for (let index = nodes.length - 1; index >= 0; index -= 1) {
+          const node = nodes[index];
+          if (node?.kind !== "tool" || node.callId !== callId) continue;
+          window.unshift({
+            type: "tool/call",
+            seq: node.seq,
+            data: { callId, name: node.name, arguments: node.arguments },
+          });
+          break;
+        }
+      }
+      return deriveToolEventViews(window, tools, agent, (error, item) => {
+        ctx.logger?.warn?.(`qq: tool presenter failed at seq ${String(item?.seq)}: ${String(error)}`);
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
   function decorateSnapshot(agent, conversation, events) {
     const row = rowFor(agent);
     const alias = liveAlias(agent.session.id);
@@ -1229,6 +1288,7 @@ export function createQqService(ctx, config) {
       id: agent.session.id,
       events,
       conversation,
+      turnStatus: turnStatusFromEvents(events),
       canMutatePending: Boolean(
         agent.inbox
         && typeof agent.inbox.replace === "function"
@@ -1707,13 +1767,15 @@ export function createQqService(ctx, config) {
       const cached = projections.get(sessionId);
       if (cached && cached.seq === event.seq) {
         const agent = agents.get(sessionId) ?? cached.agent;
-        const conversation = applyConversationEvent(cached.conversation, event, agent?.inbox);
+        const toolViews = toolViewsFor(event, agent, cached.conversation);
+        const conversation = applyConversationEvent(cached.conversation, event, agent?.inbox, toolViews);
         if (conversation) {
-          const events = cached.events.concat(event);
+          const events = agent?.session?.events ?? cached.events;
           const snapshot = {
             ...cached.snapshot,
             conversation,
             events,
+            turnStatus: applyTurnStatus(cached.snapshot.turnStatus, event),
             agentStatus: agent?.status ?? cached.snapshot.agentStatus,
           };
           projections.set(sessionId, {

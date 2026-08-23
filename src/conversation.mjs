@@ -50,20 +50,49 @@ function normalizedAssistantBlocks(blocks) {
   return asArray(blocks).map(normalizedAssistantBlock).filter(Boolean);
 }
 
-export function pendingFromInbox(inbox) {
+function replaceRange(event) {
+  const op = event?.surfaceOp;
+  if (!op || typeof op !== "object" || op.op !== "replace") return null;
+  const start = Number(op.start);
+  const end = Number(op.end);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) return null;
+  return { start, end };
+}
+
+function nodeTouchesRange(node, start, end) {
+  if (!node || typeof node !== "object") return false;
+  for (const seq of [node.seq, node.resultSeq, node.finalSeq, node.checkpointSeq]) {
+    if (Number.isSafeInteger(seq) && seq >= start && seq <= end) return true;
+  }
+  return false;
+}
+
+export function dropReplacedNodes(nodes, start, end) {
+  return asArray(nodes).filter((node) => !nodeTouchesRange(node, start, end));
+}
+
+export function pendingFromInbox(inbox, nodes) {
   const pendingState = inbox && (Array.isArray(inbox.nextTurn) || Array.isArray(inbox.nextStep))
     ? inboxSnapshot(inbox)
     : {
         "next-turn": asArray(inbox?.["next-turn"]),
         "next-step": asArray(inbox?.["next-step"]),
       };
+  const visibleIds = new Set();
+  for (const node of asArray(nodes)) {
+    if ((node?.kind === "user" || node?.kind === "steering") && node.messageId) {
+      visibleIds.add(String(node.messageId));
+    }
+  }
   const pending = [];
   for (const target of ["next-step", "next-turn"]) {
     for (const entry of pendingState[target]) {
       const message = entry?.message ?? entry;
       if (!directHuman(message)) continue;
+      const id = String(message?.id ?? "");
+      if (id && visibleIds.has(id)) continue;
       pending.push({
-        id: String(message?.id ?? ""),
+        id,
         target,
         placement: target === "next-step" ? "steering" : "queued",
         message,
@@ -138,7 +167,32 @@ export function applyUserMessage(conversation, event) {
   const nodes = Array.isArray(conversation.nodes) ? conversation.nodes.slice() : [];
   const pending = Array.isArray(conversation.pending) ? conversation.pending : [];
   const message = event.data ?? {};
-  if (event.surfaceOp && typeof event.surfaceOp === "object") return null;
+  const range = replaceRange(event);
+  if (range) {
+    const nextNodes = dropReplacedNodes(nodes, range.start, range.end);
+    const source = message?.source;
+    if (source?.kind === "plugin" && source?.plugin === "compact") {
+      return { nodes: nextNodes, pending };
+    }
+    nextNodes.push(directHuman(message)
+      ? {
+          kind: "user",
+          key: `user:${event.seq}`,
+          seq: event.seq,
+          time: event.time,
+          messageId: String(message?.id ?? ""),
+          content: asArray(message?.content),
+        }
+      : {
+          kind: "context",
+          key: `context:${event.seq}`,
+          seq: event.seq,
+          time: event.time,
+          source: source ?? { kind: "unknown" },
+          content: asArray(message?.content),
+        });
+    return { nodes: nextNodes, pending };
+  }
   if (event.surfaceOp !== "append") return { nodes, pending };
   if (!directHuman(message)) {
     nodes.push({
@@ -202,19 +256,243 @@ export function applyAssistantSeal(conversation, event) {
     step,
     status: "settled",
     blocks,
+    finalSeq: event.seq,
+    finalTime: event.time,
   };
   if (live) nodes[nodes.length - 1] = next;
   else nodes.push(next);
   return { nodes, pending };
 }
 
-const TRANSCRIPT_NEUTRAL = new Set(["turn/start", "turn/end", "step/start", "step/end"]);
+const TRANSCRIPT_NEUTRAL = new Set(["turn/start", "step/start", "step/end"]);
+
+function viewNodes(conversation) {
+  return {
+    nodes: Array.isArray(conversation.nodes) ? conversation.nodes.slice() : [],
+    pending: Array.isArray(conversation.pending) ? conversation.pending : [],
+  };
+}
+
+function findToolIndex(nodes, callId) {
+  const id = String(callId ?? "");
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    if (nodes[index]?.kind === "tool" && nodes[index].callId === id) return index;
+  }
+  return -1;
+}
+
+export function applyToolCall(conversation, event, toolViews) {
+  if (!conversation || typeof conversation !== "object" || event?.type !== "tool/call") {
+    return null;
+  }
+  const { nodes, pending } = viewNodes(conversation);
+  const data = event.data ?? {};
+  const callId = String(data.callId ?? "");
+  if (findToolIndex(nodes, callId) >= 0) return { nodes, pending };
+  const view = eventView(toolViews, event);
+  const callView = view?.for === "call" ? view.view : data.callView;
+  nodes.push({
+    kind: "tool",
+    key: `tool:${callId || event.seq}`,
+    seq: event.seq,
+    time: event.time,
+    turn: data.turn,
+    step: data.step,
+    callId,
+    name: asText(data.name) || "unknown",
+    arguments: asText(data.arguments),
+    argumentSummary: argumentSummary(data.arguments),
+    callView: callView ?? null,
+    resultView: null,
+    status: "running",
+    expanded: false,
+    content: [],
+  });
+  return { nodes, pending };
+}
+
+export function applyToolResult(conversation, event, toolViews) {
+  if (!conversation || typeof conversation !== "object" || event?.type !== "tool/result") {
+    return null;
+  }
+  const { nodes, pending } = viewNodes(conversation);
+  const range = replaceRange(event);
+  if (event.surfaceOp && event.surfaceOp !== "append" && !range) return { nodes, pending };
+  const data = event.data ?? {};
+  const callId = resultCallId(event);
+  const block = resultBlock(event);
+  let index = findToolIndex(nodes, callId);
+  if (index < 0) {
+    nodes.push({
+      kind: "tool",
+      key: `tool:${callId || event.seq}`,
+      seq: event.seq,
+      time: event.time,
+      turn: data.turn,
+      step: data.step,
+      callId,
+      name: "unknown",
+      arguments: "",
+      argumentSummary: "",
+      callView: null,
+      resultView: null,
+      status: "running",
+      expanded: false,
+      content: [],
+    });
+    index = nodes.length - 1;
+  }
+  const view = eventView(toolViews, event);
+  const resultView = view?.for === "result" ? view.view : data.resultView;
+  const content = asArray(block?.content);
+  const explicitError = block?.isError === true || Boolean(data.error);
+  const code = safeFailureCode(data.error?.code);
+  const interrupted = code === "ABORTED_BEFORE_DISPATCH" || code === "INTERRUPTED"
+    || String(data.error?.code ?? "").toLowerCase() === "interrupted";
+  const node = nodes[index];
+  nodes[index] = {
+    ...node,
+    resultSeq: event.seq,
+    resultTime: event.time,
+    resultView: resultView ?? null,
+    content,
+    error: data.error ?? null,
+    isError: explicitError,
+    status: interrupted ? "stopped" : explicitError || terminalFailed(resultView) ? "error" : "success",
+    hasMedia: hasMedia(content),
+    expanded: explicitError || terminalFailed(resultView) || hasMedia(content),
+  };
+  return { nodes, pending };
+}
+
+export function applyCommandRun(conversation, event) {
+  if (!conversation || typeof conversation !== "object" || event?.type !== "command/run") {
+    return null;
+  }
+  const { nodes, pending } = viewNodes(conversation);
+  const data = event.data ?? {};
+  const commandId = String(data.commandId ?? `seq-${event.seq}`);
+  nodes.push({
+    kind: "command",
+    key: `command:${commandId}`,
+    seq: event.seq,
+    time: event.time,
+    commandId,
+    name: asText(data.name) || "command",
+    args: typeof data.args === "string" ? data.args : "",
+    status: "running",
+    outcome: null,
+  });
+  return { nodes, pending };
+}
+
+export function applyCommandDone(conversation, event) {
+  if (!conversation || typeof conversation !== "object" || event?.type !== "command/done") {
+    return null;
+  }
+  const { nodes, pending } = viewNodes(conversation);
+  const data = event.data ?? {};
+  const commandId = String(data.commandId ?? "");
+  let index = -1;
+  for (let i = nodes.length - 1; i >= 0; i -= 1) {
+    if (nodes[i]?.kind === "command" && nodes[i].commandId === commandId) {
+      index = i;
+      break;
+    }
+  }
+  if (index < 0) {
+    nodes.push({
+      kind: "command",
+      key: `command:${commandId || event.seq}`,
+      seq: event.seq,
+      time: event.time,
+      commandId,
+      name: "command",
+      args: "",
+      status: "running",
+      outcome: null,
+    });
+    index = nodes.length - 1;
+  }
+  const node = nodes[index];
+  nodes[index] = {
+    ...node,
+    status: data.kind === "error" ? "error" : "success",
+    outcome: {
+      kind: data.kind === "error" ? "error" : "success",
+      ...(typeof data.text === "string" ? { text: data.text } : {}),
+      ...(Number.isSafeInteger(data.sourceEventSeq) ? { sourceEventSeq: data.sourceEventSeq } : {}),
+    },
+    doneSeq: event.seq,
+  };
+  return { nodes, pending };
+}
+
+export function applyTurnEnd(conversation, event) {
+  if (!conversation || typeof conversation !== "object" || event?.type !== "turn/end") {
+    return null;
+  }
+  const { nodes, pending } = viewNodes(conversation);
+  const data = event.data ?? {};
+  const reason = data.reason ?? {};
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    if (node?.kind === "tool" && node.turn === data.turn && node.status === "running") {
+      nodes[index] = {
+        ...node,
+        status: "stopped",
+        isError: true,
+        error: { name: "Interrupted", code: reason.kind === "aborted" ? "interrupted" : "missing-result" },
+        expanded: true,
+      };
+      continue;
+    }
+    if (node?.kind === "assistant" && node.turn === data.turn && node.status === "streaming") {
+      nodes[index] = { ...node, status: "interrupted", finalSeq: event.seq };
+    }
+  }
+  if (reason.kind === "error") {
+    nodes.push({
+      kind: "turn-error",
+      key: `turn-error:${event.seq}`,
+      seq: event.seq,
+      time: event.time,
+      turn: data.turn,
+      code: safeFailureCode(reason.error?.code),
+    });
+  } else if (["aborted", "interrupted", "blocked", "max-tokens"].includes(reason.kind)) {
+    nodes.push({
+      kind: "turn-status",
+      key: `turn-status:${event.seq}`,
+      seq: event.seq,
+      time: event.time,
+      turn: data.turn,
+      status: reason.kind,
+    });
+  }
+  return { nodes, pending };
+}
+
+function applyFallbackAppend(conversation, event) {
+  const { nodes, pending } = viewNodes(conversation);
+  const data = event.data ?? {};
+  nodes.push({
+    kind: "fallback",
+    key: `fallback:${event.seq}`,
+    seq: event.seq,
+    time: event.time,
+    eventType: String(event.type ?? "unknown"),
+    summary: typeof data.summary === "string" ? data.summary.slice(0, 500) : "",
+  });
+  return { nodes, pending };
+}
 
 /**
- * Apply one session event onto a conversation view. Returns null when the
- * caller must rebuild from the log.
+ * Apply one session event onto a conversation view. Returns null only when the
+ * arguments are not a conversation/event pair. Unknown events stay identity so
+ * the live session never refolds the log on the hot path.
  */
-export function applyConversationEvent(conversation, event, inbox) {
+export function applyConversationEvent(conversation, event, inbox, toolViews) {
   if (!conversation || typeof conversation !== "object" || !event || typeof event !== "object") {
     return null;
   }
@@ -229,6 +507,21 @@ export function applyConversationEvent(conversation, event, inbox) {
     case "assistant/message":
       next = applyAssistantSeal(conversation, event);
       break;
+    case "tool/call":
+      next = applyToolCall(conversation, event, toolViews);
+      break;
+    case "tool/result":
+      next = applyToolResult(conversation, event, toolViews);
+      break;
+    case "command/run":
+      next = applyCommandRun(conversation, event);
+      break;
+    case "command/done":
+      next = applyCommandDone(conversation, event);
+      break;
+    case "turn/end":
+      next = applyTurnEnd(conversation, event);
+      break;
     case "agent/inbox/spliced":
       next = {
         nodes: Array.isArray(conversation.nodes) ? conversation.nodes : [],
@@ -238,10 +531,10 @@ export function applyConversationEvent(conversation, event, inbox) {
     default:
       next = TRANSCRIPT_NEUTRAL.has(event.type) || event.surfaceOp !== "append"
         ? conversation
-        : null;
+        : applyFallbackAppend(conversation, event);
   }
   if (!next) return null;
-  if (inbox !== undefined) return { nodes: next.nodes, pending: pendingFromInbox(inbox) };
+  if (inbox !== undefined) return { nodes: next.nodes, pending: pendingFromInbox(inbox, next.nodes) };
   return next;
 }
 
@@ -399,6 +692,22 @@ export function projectConversation(events, options = {}) {
     nodeIndex.set(node.key, node);
     return node;
   };
+  const dropRange = (start, end) => {
+    const kept = [];
+    for (const node of nodes) {
+      if (nodeTouchesRange(node, start, end)) {
+        nodeIndex.delete(node.key);
+        if (node.kind === "tool") tools.delete(String(node.callId ?? ""));
+        if (node.kind === "assistant") assistant.delete(`${Number(node.turn ?? 0)}:${Number(node.step ?? 0)}`);
+        if (node.kind === "command") commands.delete(String(node.commandId ?? ""));
+        if (node.kind === "compaction") compactions.delete(String(node.compactionId ?? ""));
+      } else {
+        kept.push(node);
+      }
+    }
+    nodes.length = 0;
+    nodes.push(...kept);
+  };
   const removeNode = (node) => {
     const at = nodes.indexOf(node);
     if (at >= 0) nodes.splice(at, 1);
@@ -536,11 +845,34 @@ export function projectConversation(events, options = {}) {
       case "user/message": {
         const message = data;
         const compactSource = message?.source;
-        if (event.surfaceOp && typeof event.surfaceOp === "object"
-          && compactSource?.kind === "plugin" && compactSource?.plugin === "compact") {
-          const node = compactionFor(compactSource.compactionId, event, compactSource.sourceCommandId);
-          node.status = "completed";
-          node.checkpointSeq = event.seq;
+        const range = replaceRange(event);
+        if (range) {
+          dropRange(range.start, range.end);
+          if (compactSource?.kind === "plugin" && compactSource?.plugin === "compact") {
+            const node = compactionFor(compactSource.compactionId, event, compactSource.sourceCommandId);
+            node.status = "completed";
+            node.checkpointSeq = event.seq;
+            break;
+          }
+          if (!directHuman(message)) {
+            addNode({
+              kind: "context",
+              key: `context:${event.seq}`,
+              seq: event.seq,
+              time: event.time,
+              source: message?.source ?? { kind: "unknown" },
+              content: asArray(message?.content),
+            });
+            break;
+          }
+          addNode({
+            kind: "user",
+            key: `user:${event.seq}`,
+            seq: event.seq,
+            time: event.time,
+            messageId: String(message?.id ?? ""),
+            content: asArray(message?.content),
+          });
           break;
         }
         if (event.surfaceOp !== "append") break;
@@ -634,7 +966,8 @@ export function projectConversation(events, options = {}) {
         break;
       }
       case "tool/result": {
-        if (event.surfaceOp && event.surfaceOp !== "append") break;
+        const range = replaceRange(event);
+        if (event.surfaceOp && event.surfaceOp !== "append" && !range) break;
         const callId = resultCallId(event);
         const block = resultBlock(event);
         let node = tools.get(callId);
@@ -844,7 +1177,7 @@ export function projectConversation(events, options = {}) {
     }
   }
 
-  return { nodes, pending: pendingFromInbox(options.inbox ?? inbox) };
+  return { nodes, pending: pendingFromInbox(options.inbox ?? inbox, nodes) };
 }
 
 export const internals = Object.freeze({
@@ -860,5 +1193,7 @@ export const internals = Object.freeze({
   applyAssistantSeal,
   applyConversationEvent,
   applyUserMessage,
+  dropReplacedNodes,
   pendingFromInbox,
+  replaceRange,
 });
