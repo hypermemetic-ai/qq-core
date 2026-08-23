@@ -3,20 +3,29 @@
 
 import { randomUUID } from "node:crypto";
 
-function userMessage(text) {
+function userMessage(content) {
+  const blocks = Array.isArray(content) && content.length > 0
+    ? content
+    : [{ type: "text", text: content == null ? "" : String(content) }];
   return {
     id: randomUUID(),
     role: "user",
-    content: [{ type: "text", text }],
+    content: blocks,
     source: { kind: "plugin", plugin: "qq", form: "notice" },
   };
+}
+
+function userContent({ user, content } = {}) {
+  if (Array.isArray(content) && content.length > 0) return content;
+  return [{ type: "text", text: user == null ? "" : String(user) }];
 }
 
 /**
  * Stream once. Fresh sessionId each call. Empty string on miss/failure.
  * DSH GenerateOptions has no cacheRetention field; none is sent.
+ * `content` (blocks) wins over `user` (text) when both are present.
  */
-export async function oneShot(llm, binding, { system, user, signal } = {}) {
+export async function oneShot(llm, binding, { system, user, content, signal } = {}) {
   if (!llm || typeof llm.stream !== "function") return "";
   if (!binding?.provider || !binding?.model) return "";
   const request = {
@@ -24,7 +33,7 @@ export async function oneShot(llm, binding, { system, user, signal } = {}) {
     model: binding.model,
     ...(binding.effort ? { reasoningEffort: binding.effort } : {}),
     system,
-    messages: [userMessage(user)],
+    messages: [userMessage(userContent({ user, content }))],
     sessionId: `session-${randomUUID()}`,
     ...(signal ? { signal } : {}),
   };
@@ -41,4 +50,5 @@ export async function oneShot(llm, binding, { system, user, signal } = {}) {
 
 export const internals = Object.freeze({
   userMessage,
+  userContent,
 });
