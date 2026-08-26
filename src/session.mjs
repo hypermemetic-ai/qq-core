@@ -122,11 +122,7 @@ function fenceProjectsTools(agentCtx) {
 }
 
 function projectsSetup(selection) {
-  const inner = selectionSetup(selection);
-  return (agentCtx) => {
-    inner(agentCtx);
-    fenceProjectsTools(agentCtx);
-  };
+  return selectionSetup(selection);
 }
 
 function homeSetup(selection) {

@@ -23,6 +23,8 @@
     ignored:
       - '.worktrees/**'
       - '**/.worktrees/**'
+      - 'qq-context/**'
+      - '**/qq-context/**'
       - '**/node_modules/**'
       - '**/.git/**'
       - '**/.*'
