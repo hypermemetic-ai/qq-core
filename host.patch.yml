@@ -44,6 +44,15 @@
       - 'cache'
       - 'data'
 
+# DSH owns the authoritative live-preferred history corpus. QQ enables only its
+# disposable FTS read model, lazily, at a dedicated durable path; transcript
+# JSONL remains authoritative and is never written through this index.
+- id: session-query-sqlite
+  name: '@deepseek-ai/dsh-session-query-sqlite'
+  config:
+    path: !!js dshHomePath('session-query/session-history.sqlite')
+    openAt: first-search
+
 # Architect owns fold on this profile. compact-basic must not auto-summarize
 # the talking session; qq-workflows chops fat tool dumps and folds by notes.
 - id: compaction-basic

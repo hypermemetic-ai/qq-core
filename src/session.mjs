@@ -527,6 +527,24 @@ function slashName(line) {
   return match ? match[1] : "";
 }
 
+async function isUserInvocableSkill(ctx, agent, name) {
+  if (!name) return false;
+  let skills;
+  try { skills = ctx.get("skills", false); } catch { return false; }
+  if (!skills || typeof skills.get !== "function") return false;
+  try {
+    const skill = await skills.get(name, {
+      cwd: agent?.session?.header?.cwd,
+      scope: agent,
+    });
+    return skill?.name === name && skill?.invocation?.userInvocable === true;
+  } catch {
+    // Skill discovery failure does not turn an unknown slash command into a
+    // talking prompt. The ordinary command path retains its existing error.
+    return false;
+  }
+}
+
 /** Compact change token for one catalog + session snapshot. */
 export function snapshotFingerprint(snapshot) {
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
@@ -713,7 +731,14 @@ export function createQqService(ctx, config) {
   const statusSince = new Map();
   const projections = new Map();
   const sessionObservers = new Map();
+  const directUserMessageObservers = new Set();
   const defaultCreatedAt = Date.now();
+
+  function notifyDirectUserMessage(event) {
+    for (const observer of [...directUserMessageObservers]) {
+      try { observer(event); } catch { /* admission must not depend on an optional policy consumer */ }
+    }
+  }
   const clock = typeof config.now === "function" ? config.now : Date.now;
   const aliasFile = config.aliasFile !== undefined || envHasDshHome()
     ? defaultAliasFile(process.env, config)
@@ -2042,6 +2067,11 @@ export function createQqService(ctx, config) {
     defaultProject,
     defaultFolder: bootProject.grouped ? bootProject.folder?.name : undefined,
     projectsRoot,
+    onDirectUserMessage(observer) {
+      if (typeof observer !== "function") throw new TypeError("qq: direct-user observer must be a function");
+      directUserMessageObservers.add(observer);
+      return () => directUserMessageObservers.delete(observer);
+    },
     listProjects: () => catalog(),
     listProjectFiles: projectFiles.listProjectFiles,
     readProjectFile: projectFiles.readProjectFile,
@@ -2104,6 +2134,7 @@ export function createQqService(ctx, config) {
       await boot;
       const agent = await liveChairAgent(sessionId);
       const line = String(text ?? "");
+      let userSkillPrompt = false;
       if (line.startsWith("/")) {
         const name = slashName(line);
         if (name === "new") {
@@ -2129,27 +2160,30 @@ export function createQqService(ctx, config) {
           const reopened = await reopen(targetId);
           return { kind: "navigate", action: "reopen", ...reopened };
         }
-        const commands = ctx.get("commands", false);
-        if (!commands || typeof commands.execute !== "function") {
-          throw httpError(503, "qq: slash commands require ctx.commands");
+        userSkillPrompt = await isUserInvocableSkill(ctx, agent, name);
+        if (!userSkillPrompt) {
+          const commands = ctx.get("commands", false);
+          if (!commands || typeof commands.execute !== "function") {
+            throw httpError(503, "qq: slash commands require ctx.commands");
+          }
+          const parsed = typeof commands.parseCommand === "function"
+            ? commands.parseCommand(line)
+            : /^\/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])/u.exec(line);
+          if (!parsed) {
+            throw httpError(400, "qq: unknown slash command");
+          }
+          const commandName = parsed.name ?? parsed[1];
+          const execution = await commands.execute(agent, line, new AbortController().signal);
+          if (!execution) {
+            throw httpError(400, `qq: unknown slash command /${commandName}`);
+          }
+          await sessions.flush(agent.session);
+          const result = execution.result;
+          if (result?.kind === "error") {
+            throw httpError(400, result.text || `qq: /${commandName} failed`);
+          }
+          return typeof result?.text === "string" ? result.text : "";
         }
-        const parsed = typeof commands.parseCommand === "function"
-          ? commands.parseCommand(line)
-          : /^\/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])/u.exec(line);
-        if (!parsed) {
-          throw httpError(400, "qq: unknown slash command");
-        }
-        const commandName = parsed.name ?? parsed[1];
-        const execution = await commands.execute(agent, line, new AbortController().signal);
-        if (!execution) {
-          throw httpError(400, `qq: unknown slash command /${commandName}`);
-        }
-        await sessions.flush(agent.session);
-        const result = execution.result;
-        if (result?.kind === "error") {
-          throw httpError(400, result.text || `qq: /${commandName} failed`);
-        }
-        return typeof result?.text === "string" ? result.text : "";
       }
       const finder = ctx.get("image-finder", false);
       const workflows = ctx.get("qq-workflows", false);
@@ -2157,7 +2191,7 @@ export function createQqService(ctx, config) {
         (finder && typeof finder.inFindMode === "function" && finder.inFindMode(sessionId)) ||
         (workflows?.workflows?.selected?.(sessionId) === "find"),
       );
-      if (finder && inFind) {
+      if (finder && inFind && !userSkillPrompt) {
         if (typeof finder.handlePrompt !== "function") {
           throw httpError(503, "image-finder: find mode is unavailable");
         }
@@ -2170,8 +2204,14 @@ export function createQqService(ctx, config) {
       }
       const message = userMessage(line);
       const mode = agent.status === "running" ? "steer" : "followup";
-      if (mode === "steer") agent.steer(message);
-      else agent.followup(message);
+      notifyDirectUserMessage({ kind: "admitted", agent, message, mode });
+      try {
+        if (mode === "steer") agent.steer(message);
+        else agent.followup(message);
+      } catch (error) {
+        notifyDirectUserMessage({ kind: "revoked", agent, message, mode });
+        throw error;
+      }
       // followup()/steer() durably append their inbox splice synchronously. Flush
       // that admission and return; the Agent owns later claim and turn progress.
       await sessions.flush(agent.session);
@@ -2195,6 +2235,7 @@ export function createQqService(ctx, config) {
       if (!inbox.replace(message.id, replacement)) {
         throw httpError(409, "qq: pending message is no longer available");
       }
+      notifyDirectUserMessage({ kind: "updated", agent, message: replacement, previous: message });
       await sessions.flush(agent.session);
       return { accepted: true, messageId: replacement.id };
     },
@@ -2205,9 +2246,13 @@ export function createQqService(ctx, config) {
       if (!inbox || typeof inbox.remove !== "function") {
         throw httpError(501, "qq: pending message removal is unavailable");
       }
-      if (!inbox.remove(String(messageId ?? ""))) {
+      const id = String(messageId ?? "");
+      const message = [...(inbox.nextTurn ?? []), ...(inbox.nextStep ?? [])]
+        .find((candidate) => String(candidate?.id ?? "") === id);
+      if (!message || !inbox.remove(id)) {
         throw httpError(409, "qq: pending message is no longer available");
       }
+      notifyDirectUserMessage({ kind: "removed", agent, message });
       await sessions.flush(agent.session);
       return { accepted: true };
     },

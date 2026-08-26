@@ -14,7 +14,8 @@
     "./session-scope": "./src/session-scope.mjs",
     "./alias": "./src/alias.mjs",
     "./ask": "./src/ask.mjs",
-    "./skill-tool": "./src/skill-tool.mjs"
+    "./skill-tool": "./src/skill-tool.mjs",
+    "./session-history": "./src/session-history.mjs"
   },
   "files": [
     "src/",

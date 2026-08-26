@@ -31,6 +31,56 @@ The qq plugin hides DSH's generic `skill` tool when a session catalog has no
 model-invocable skills, and restores it when a real skill appears. Grok
 inherits those DSH names unchanged.
 
+## Session-history discovery
+
+QQ exposes historical discovery only through the direct-user gesture
+`/find-session ...`. `find-session` is a user-invocable, model-disabled runtime
+skill, so it is absent from the model skill catalog. The gesture enters the
+Agent as an ordinary direct-user prompt (rather than an unknown slash command),
+while QQ's `/new`, `/clear`, `/close`, and `/resume`/`/reopen` built-ins retain
+priority and all other slash commands retain their existing dispatch.
+
+For the exact claimed prompt and turn, QQ registers one agent-scoped read-only
+`session_history` tool. This is conversation discovery, not general transcript
+or debug search. Both actions are internally restricted to `user/message` and
+`assistant/message`; tool calls/results, todos, turn errors, reasoning, and
+attachments may exist in DSH's private derived index but cannot be queried or
+rendered through QQ. QQ includes `current` and `shadowed` message surfaces so
+compaction/replacement does not erase historical conversational clues, and
+excludes `log-only`; surface policy is not a model control.
+
+`search` accepts a required literal query plus optional event-time,
+current/all-workspace, page limit, and opaque cursor fields. It returns compact
+grouped sessions whose strongest match is labeled `user` or `assistant`.
+Search results expose a stable `sessionId`; `context` accepts that id and a message seq. Its `before`
+and `after` values count conversational messages (0–12 each), never raw
+structural events, and the target is always included and marked. Each message
+has a fixed 900-character cap. Explicit omission/truncation metadata, an
+11,000-character aggregate text budget, and a 16 KiB serialized-result ceiling
+bound every result. The tool is revoked on rejection, error, cancellation/turn
+end, idle transition, agent disposal, or plugin/HMR disposal, and every
+execution rechecks the exact active grant.
+
+The adapter delegates to DSH's public `ctx.sessionQuery` service. DSH provides
+the live-preferred logical corpus, detached reads, semantic extraction, FTS
+ranking, and pagination. QQ neither scans JSONL nor stores or mutates transcript
+data. `core/host.patch.yml` changes the existing SQLite query backend to
+`openAt: first-search` with a dedicated derived index under
+`$DSH_HOME/session-query/`; JSONL remains authoritative and read-only. Tests
+inject a fake `sessionQuery` and never open that production path.
+
+There are two substrate tradeoffs. First, DSH does not expose a cursor that
+pages semantic messages by distance from one seq, so context obtains one forced
+message-only semantic observation and slices the nearest messages. Second,
+DSH's generic `assistant/message` semantic document intentionally includes
+embedded tool-call names/arguments as well as visible text. QQ therefore uses
+public detached `readEvent` observations to verify search candidates and
+project only `text` blocks; context applies the same projection and does not
+count tool-call-only assistant messages. Reasoning and attachment blocks are
+discarded. A call can internally materialize the candidate session's message
+list and perform extra detached reads, but only the fixed bounded conversation
+projection reaches the model. QQ adds no transcript scanner, store, or index.
+
 `read()` projects the DSH event log and live durable inbox into `conversation`.
 The projection is rebuilt from DSH authority on every read; it is not another
 transcript store. Idle text uses `agent.followup`, busy text uses `agent.steer`,
