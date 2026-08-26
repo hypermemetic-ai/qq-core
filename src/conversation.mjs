@@ -360,7 +360,9 @@ export function applyToolResult(conversation, event, toolViews) {
     isError: explicitError,
     status: interrupted ? "stopped" : explicitError || terminalFailed(resultView) ? "error" : "success",
     hasMedia: hasMedia(content),
-    expanded: explicitError || terminalFailed(resultView) || hasMedia(content),
+    // Completed tools all keep the same compact transcript footprint. The UI
+    // chooses an inline reveal or the full-screen reader when the card is used.
+    expanded: false,
   };
   return { nodes, pending };
 }
@@ -443,7 +445,7 @@ export function applyTurnEnd(conversation, event) {
         status: "stopped",
         isError: true,
         error: { name: "Interrupted", code: reason.kind === "aborted" ? "interrupted" : "missing-result" },
-        expanded: true,
+        expanded: false,
       };
       continue;
     }
@@ -1006,7 +1008,7 @@ export function projectConversation(events, options = {}) {
         node.isError = explicitError;
         node.status = interrupted ? "stopped" : explicitError || terminalFailed(resultView) ? "error" : "success";
         node.hasMedia = hasMedia(content);
-        node.expanded = explicitError || terminalFailed(resultView) || node.hasMedia;
+        node.expanded = false;
         break;
       }
       case "command/run": {
@@ -1130,7 +1132,7 @@ export function projectConversation(events, options = {}) {
           tool.status = "stopped";
           tool.isError = true;
           tool.error = { name: "Interrupted", code: reason.kind === "aborted" ? "interrupted" : "missing-result" };
-          tool.expanded = true;
+          tool.expanded = false;
         }
         for (const state of assistant.values()) {
           if (state.turn !== data.turn || !state.node || state.node.status !== "streaming") continue;
