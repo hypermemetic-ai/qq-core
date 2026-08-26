@@ -19,6 +19,7 @@ const RUNNING_CLEAR = "clear is unavailable while this session is running";
 const RUNNING_CLOSE = "close is unavailable while this session is running";
 const INACTIVE = "DSH session is not active";
 const NOT_FOUND = "DSH session not found";
+const CHILD_ORIGIN = "subagent";
 const PROJECTS_ALIAS = "projects";
 const PROJECTS_WRITE_TOOLS = Object.freeze(["bash", "write", "edit"]);
 const PROJECTS_WRITE_REASON =
@@ -26,7 +27,28 @@ const PROJECTS_WRITE_REASON =
 // AgentHandles are DSH-owned capabilities. Keep the capability on the live
 // Agent so a qq fiber replacement can rebuild its index without owning or
 // disposing the Agent itself.
-const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq/agent-handle");
+export const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq/agent-handle");
+const CORDIS_ORIGINAL = Symbol.for("cordis.original");
+
+export function adoptAgentHandle(handle) {
+  const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
+  const agent = owner?.agent ?? (handle?.session ? handle : undefined);
+  if (!owner || !SESSION_ID.test(agent?.session?.id)) return handle;
+  try {
+    Object.defineProperty(agent, AGENT_HANDLE, {
+      value: owner,
+      configurable: true,
+    });
+  } catch {
+    // Non-extensible Agents still close through the live handle map.
+  }
+  return handle;
+}
+
+function unwrapAgents(value) {
+  const original = value?.[CORDIS_ORIGINAL];
+  return original ?? value;
+}
 
 /**
  * DSH binds Agent create/resume lifecycle to the accessing fiber. Plugin HMR
@@ -810,6 +832,37 @@ export function createQqService(ctx, config) {
     return classifyWorkspace(agent);
   }
 
+  function parentSessionOf(agent) {
+    const header = agent?.session?.header ?? {};
+    const parent = header.parentSession ?? header.parentId ?? header.parent ?? header.parent_session;
+    return SESSION_ID.test(String(parent ?? "")) ? String(parent) : undefined;
+  }
+
+  function childRelationship(agent) {
+    if (agent?.session?.header?.origin !== CHILD_ORIGIN) return undefined;
+    const parentId = parentSessionOf(agent);
+    if (!parentId) return undefined;
+    const parent = agents.get(parentId);
+    const parentWorkspace = classifyAgent(parent);
+    if (!parentWorkspace || isUnpublished(parentId)) return undefined;
+    const workspace = classifyWorkspace(agent) ?? parentWorkspace;
+    return {
+      parent: parentId,
+      workspace: {
+        ...workspace,
+        cwd: agentCwd(agent) ?? workspace.cwd,
+      },
+    };
+  }
+
+  function classifyVisibleAgent(agent) {
+    const chair = classifyAgent(agent);
+    if (chair) return { ...chair, kind: "chair" };
+    const child = childRelationship(agent);
+    if (!child) return undefined;
+    return { ...child.workspace, kind: "child", parent: child.parent };
+  }
+
   function isUnpublished(sessionId) {
     return unpublished.has(sessionId);
   }
@@ -856,22 +909,27 @@ export function createQqService(ctx, config) {
   }
 
   function rememberHandle(handle) {
-    const agent = handle?.agent;
-    const sessionId = agent?.session?.id;
-    if (SESSION_ID.test(sessionId) && typeof handle.dispose === "function") {
-      handles.set(sessionId, handle);
-      try {
-        Object.defineProperty(agent, AGENT_HANDLE, {
-          value: handle,
-          configurable: true,
-        });
-      } catch {
-        // An exotic non-extensible Agent remains live, but cannot be closed by
-        // a replacement qq fiber because DSH exposes no handle lookup service.
-      }
-    }
+    adoptAgentHandle(handle);
+    const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
+    const sessionId = owner?.agent?.session?.id;
+    if (SESSION_ID.test(sessionId)) handles.set(sessionId, owner);
     return handle;
   }
+
+  const wrappedCreates = new WeakSet();
+  function wrapAgentCreate(target) {
+    if (!target || wrappedCreates.has(target)) return;
+    if (typeof target.create === "function") {
+      const create = target.create.bind(target);
+      target.create = async (options) => rememberHandle(await create(options));
+    }
+    if (typeof target.resume === "function") {
+      const resume = target.resume.bind(target);
+      target.resume = async (options) => rememberHandle(await resume(options));
+    }
+    wrappedCreates.add(target);
+  }
+  wrapAgentCreate(agents);
 
   for (const agent of liveAgents()) {
     const handle = agent?.[AGENT_HANDLE];
@@ -950,18 +1008,27 @@ export function createQqService(ctx, config) {
     ctx.on("agent/created", ({ agent }) => {
       const sessionId = agent?.session?.id;
       if (!SESSION_ID.test(sessionId) || isUnpublished(sessionId)) return;
+      const handle = agent?.[AGENT_HANDLE];
+      if (handle && typeof handle.dispose === "function") handles.set(sessionId, handle);
       rememberStatus(agent);
       syncLive(sessionId);
+      const relationship = childRelationship(agent);
+      if (relationship) rebuildAndNotify(relationship.parent);
     });
     ctx.on("agent/status", ({ agent, status }) => {
       rememberStatus(agent, status);
+      const relationship = childRelationship(agent);
+      if (relationship && observersFor(relationship.parent)) rebuildAndNotify(relationship.parent);
     });
     ctx.on("agent/disposed", (event = {}) => {
-      const sessionId = event.agent?.session?.id;
+      const agent = event.agent;
+      const sessionId = agent?.session?.id;
+      const relationship = childRelationship(agent);
       if (SESSION_ID.test(sessionId)) {
         statusSince.delete(sessionId);
         projections.delete(sessionId);
       }
+      if (relationship) rebuildAndNotify(relationship.parent);
       // Host shutdown disposes every Agent. That is not operator close — do
       // not persist an empty live-chair set here or restore will always be empty.
       syncLive();
@@ -980,7 +1047,7 @@ export function createQqService(ctx, config) {
     if (!SESSION_ID.test(sessionId)) throw httpError(404, NOT_FOUND);
     if (isUnpublished(sessionId)) return undefined;
     const live = agents.get(sessionId);
-    if (live && classifyAgent(live)) return live;
+    if (live && classifyVisibleAgent(live)) return live;
     return undefined;
   }
 
@@ -999,15 +1066,36 @@ export function createQqService(ctx, config) {
     await rejectInactive(sessionId);
   }
 
+  async function liveChairAgent(sessionId) {
+    const agent = await liveAgent(sessionId);
+    if (!classifyAgent(agent)) {
+      throw httpError(403, "qq: child sessions are observe-only", "child-observe-only");
+    }
+    return agent;
+  }
+
   function createdAtFor(agent) {
     return agent.session.header?.createdAt
       ?? (agent.session.id === defaultSessionId ? defaultCreatedAt : 0);
   }
 
   function rowFor(agent) {
-    const classified = classifyAgent(agent);
+    const classified = classifyVisibleAgent(agent);
     const recency = sessionRecency(agent.session, createdAtFor(agent));
     const alias = book.aliasFor(agent.session.id);
+    if (classified?.kind === "child") {
+      return {
+        id: agent.session.id,
+        createdAt: recency.createdAt,
+        latestEventAt: recency.latest,
+        cwd: classified.cwd,
+        scope: classified.scope,
+        context: classified.context,
+        origin: CHILD_ORIGIN,
+        parent: classified.parent,
+        ...(alias ? { alias } : {}),
+      };
+    }
     if (classified?.scope === "home") {
       return {
         id: agent.session.id,
@@ -1046,6 +1134,71 @@ export function createQqService(ctx, config) {
       } : {}),
       ...(alias ? { alias } : {}),
     };
+  }
+
+  function childRowsFor(agent) {
+    if (!classifyAgent(agent)) return [];
+    const parentId = agent.session.id;
+    return liveAgents()
+      .filter((candidate) => !isUnpublished(candidate?.session?.id))
+      .map((candidate) => ({ candidate, relationship: childRelationship(candidate) }))
+      .filter(({ relationship }) => relationship?.parent === parentId)
+      .map(({ candidate }) => {
+        const alias = book.aliasFor(candidate.session.id);
+        return {
+          id: candidate.session.id,
+          ...(alias ? { alias } : {}),
+          status: candidate.status === "running" ? "running" : "idle",
+        };
+      })
+      .sort((left, right) => String(left.alias ?? left.id).localeCompare(String(right.alias ?? right.id)));
+  }
+
+  function relationshipFields(agent) {
+    const classified = classifyVisibleAgent(agent);
+    if (classified?.kind === "child") {
+      const parentAlias = book.aliasFor(classified.parent);
+      return {
+        origin: CHILD_ORIGIN,
+        parent: classified.parent,
+        ...(parentAlias ? { parentAlias } : {}),
+        children: [],
+      };
+    }
+    return { children: childRowsFor(agent) };
+  }
+
+  function stampIdentity(agent, snapshot) {
+    const row = rowFor(agent);
+    const relationship = relationshipFields(agent);
+    const next = {
+      ...snapshot,
+      ...relationship,
+      cwd: row.cwd,
+      scope: row.scope,
+      context: row.context,
+      agentStatus: agent?.status ?? snapshot?.agentStatus,
+    };
+    if (relationship.origin !== CHILD_ORIGIN) {
+      delete next.origin;
+      delete next.parent;
+      delete next.parentAlias;
+    }
+    if (row.project) {
+      next.project = row.project;
+      next.projectLabel = row.projectLabel;
+    } else {
+      delete next.project;
+      delete next.projectLabel;
+    }
+    if (row.folder) {
+      next.folder = row.folder;
+      next.folderLabel = row.folderLabel;
+    } else {
+      delete next.folder;
+      delete next.folderLabel;
+    }
+    return next;
   }
 
   async function resumeChair(sessionId, header) {
@@ -1287,13 +1440,16 @@ export function createQqService(ctx, config) {
   function decorateSnapshot(agent, conversation, events) {
     const row = rowFor(agent);
     const alias = liveAlias(agent.session.id);
+    const relationship = relationshipFields(agent);
+    const chair = relationship.origin !== CHILD_ORIGIN;
     return {
       id: agent.session.id,
       events,
       conversation,
       turnStatus: turnStatusFromEvents(events),
       canMutatePending: Boolean(
-        agent.inbox
+        chair
+        && agent.inbox
         && typeof agent.inbox.replace === "function"
         && typeof agent.inbox.remove === "function"
       ),
@@ -1302,6 +1458,7 @@ export function createQqService(ctx, config) {
       scope: row.scope,
       context: row.context,
       createdAt: row.createdAt,
+      ...relationship,
       ...(row.project ? { project: row.project, projectLabel: row.projectLabel } : {}),
       ...(row.folder ? { folder: row.folder, folderLabel: row.folderLabel } : {}),
       ...(alias ? { alias } : {}),
@@ -1333,8 +1490,7 @@ export function createQqService(ctx, config) {
     const cached = projections.get(sessionId);
     const liveSeq = projectionSeq(agent);
     if (cached && cached.agent === agent && cached.seq === liveSeq && cached.snapshot) {
-      if (cached.snapshot.agentStatus === agent.status) return cached.snapshot;
-      const snapshot = { ...cached.snapshot, agentStatus: agent.status };
+      const snapshot = stampIdentity(agent, cached.snapshot);
       cached.snapshot = snapshot;
       return snapshot;
     }
@@ -1574,13 +1730,62 @@ export function createQqService(ctx, config) {
     };
   }
 
-  async function disposeLive(sessionId) {
-    const handle = handles.get(sessionId);
-    if (!handle || typeof handle.dispose !== "function") {
-      throw httpError(409, "qq: session is not closeable");
+  function liveDescendants(sessionId) {
+    const descendants = [];
+    for (const agent of liveAgents()) {
+      const candidateId = agent.session?.id;
+      if (!SESSION_ID.test(candidateId) || candidateId === sessionId) continue;
+      let current = agent;
+      let depth = 0;
+      const seen = new Set([candidateId]);
+      while (current) {
+        const parentId = parentSessionOf(current);
+        if (!parentId || seen.has(parentId)) break;
+        depth += 1;
+        if (parentId === sessionId) {
+          descendants.push({ id: candidateId, depth });
+          break;
+        }
+        seen.add(parentId);
+        current = agents.get(parentId);
+      }
     }
+    descendants.sort((left, right) => right.depth - left.depth || left.id.localeCompare(right.id));
+    return descendants;
+  }
+
+  async function disposeDescendants(sessionId) {
+    for (const descendant of liveDescendants(sessionId)) {
+      if (agents.get(descendant.id)) await disposeLive(descendant.id);
+    }
+  }
+
+  async function disposeLive(sessionId) {
     const agent = agents.get(sessionId);
-    await handle.dispose();
+    const handle = handles.get(sessionId) ?? agent?.[AGENT_HANDLE];
+    try {
+      if (handle && typeof handle.dispose === "function") {
+        await handle.dispose();
+      } else if (agent) {
+        try { agent.cancel?.({ kind: "disposed" }); } catch { /* idle cancel is fine */ }
+        try { await agent.whenIdle?.(); } catch { /* already quiet */ }
+        const registry = unwrapAgents(agents);
+        const entry = registry?.store?.get?.(sessionId);
+        if (entry && typeof registry.detachEntered === "function") {
+          registry.detachEntered(entry);
+        } else if (typeof registry?.store?.delete === "function") {
+          registry.store.delete(sessionId);
+        } else {
+          throw httpError(409, "qq: session is not closeable");
+        }
+      } else {
+        throw httpError(409, "qq: session is not closeable");
+      }
+    } catch (error) {
+      if (agents.get(sessionId)) {
+        throw error?.status ? error : httpError(409, error instanceof Error ? error.message : String(error));
+      }
+    }
     handles.delete(sessionId);
     agentPromises.delete(sessionId);
     try { delete agent?.[AGENT_HANDLE]; } catch {}
@@ -1644,11 +1849,27 @@ export function createQqService(ctx, config) {
       if (agent.status === "running") throw httpError(409, RUNNING_CLOSE);
       const classified = classifyAgent(agent);
       if (classified?.scope !== "home") throw httpError(404, NOT_FOUND);
+      await disposeDescendants(sessionId);
       return closeHome(sessionId, classified);
     }
     const agent = await liveAgent(sessionId);
+    const child = childRelationship(agent);
+    if (child) {
+      const parent = agents.get(child.parent);
+      const parentRow = parent ? rowFor(parent) : undefined;
+      await disposeLive(sessionId);
+      return {
+        id: child.parent,
+        closed: sessionId,
+        ...(parentRow?.scope ? { scope: parentRow.scope } : {}),
+        ...(parentRow?.context ? { context: parentRow.context } : {}),
+        ...(parentRow?.project ? { project: parentRow.project } : {}),
+        ...(parentRow?.folder ? { folder: parentRow.folder } : {}),
+      };
+    }
     if (agent.status === "running") throw httpError(409, RUNNING_CLOSE);
     const classified = classifyAgent(agent);
+    if (classified) await disposeDescendants(sessionId);
     if (classified?.scope === "home") return closeHome(sessionId, classified);
     if (classified?.scope === "projects") {
       await disposeLive(sessionId);
@@ -1665,6 +1886,7 @@ export function createQqService(ctx, config) {
   async function replaceProject(sessionId, project) {
     const created = await createAt(project.name, project.cwd);
     try {
+      await disposeDescendants(sessionId);
       await disposeLive(sessionId);
     } catch (error) {
       try { await disposeLive(created.id); } catch {}
@@ -1685,6 +1907,7 @@ export function createQqService(ctx, config) {
   async function replaceHome(sessionId) {
     const classified = classifyAgent(agents.get(sessionId));
     const created = await createHome();
+    await disposeDescendants(sessionId);
     await disposeLive(sessionId);
     try {
       scratch.delete(sessionId);
@@ -1708,6 +1931,7 @@ export function createQqService(ctx, config) {
     const classified = classifyAgent(agent);
     if (classified?.scope === "home") return replaceHome(sessionId);
     if (classified?.scope === "projects") {
+      await disposeDescendants(sessionId);
       await disposeLive(sessionId);
       const created = await createProjects();
       return { ...created, closed: sessionId };
@@ -1770,19 +1994,22 @@ export function createQqService(ctx, config) {
       const sessionId = session?.id;
       if (!SESSION_ID.test(sessionId)) return;
       const cached = projections.get(sessionId);
+      if (cached && Number.isSafeInteger(event?.seq) && event.seq < cached.seq) return;
       if (cached && cached.seq === event.seq) {
         const agent = agents.get(sessionId) ?? cached.agent;
         const toolViews = toolViewsFor(event, agent, cached.conversation);
         const conversation = applyConversationEvent(cached.conversation, event, agent?.inbox, toolViews);
         if (conversation) {
-          const events = agent?.session?.events ?? cached.events;
-          const snapshot = {
+          const events = event.type === "assistant/chunk"
+            ? cached.events
+            : (agent?.session?.events ?? cached.events);
+          const snapshot = stampIdentity(agent, {
             ...cached.snapshot,
             conversation,
             events,
             turnStatus: applyTurnStatus(cached.snapshot.turnStatus, event),
             agentStatus: agent?.status ?? cached.snapshot.agentStatus,
-          };
+          });
           projections.set(sessionId, {
             agent,
             seq: event.seq + 1,
@@ -1801,7 +2028,7 @@ export function createQqService(ctx, config) {
       if (!SESSION_ID.test(sessionId) || !observersFor(sessionId)) return;
       const cached = projections.get(sessionId);
       if (cached) {
-        const snapshot = { ...cached.snapshot, agentStatus: agent.status };
+        const snapshot = stampIdentity(agent, { ...cached.snapshot, agentStatus: agent.status });
         cached.snapshot = snapshot;
         notifySession(sessionId, snapshot);
         return;
@@ -1875,7 +2102,7 @@ export function createQqService(ctx, config) {
     scratchRoot: scratch.root,
     async prompt(sessionId, text) {
       await boot;
-      const agent = await liveAgent(sessionId);
+      const agent = await liveChairAgent(sessionId);
       const line = String(text ?? "");
       if (line.startsWith("/")) {
         const name = slashName(line);
@@ -1952,7 +2179,7 @@ export function createQqService(ctx, config) {
     },
     async editPending(sessionId, messageId, text) {
       await boot;
-      const agent = await liveAgent(sessionId);
+      const agent = await liveChairAgent(sessionId);
       const inbox = agent.inbox;
       if (!inbox || typeof inbox.replace !== "function") {
         throw httpError(501, "qq: pending message editing is unavailable");
@@ -1973,7 +2200,7 @@ export function createQqService(ctx, config) {
     },
     async removePending(sessionId, messageId) {
       await boot;
-      const agent = await liveAgent(sessionId);
+      const agent = await liveChairAgent(sessionId);
       const inbox = agent.inbox;
       if (!inbox || typeof inbox.remove !== "function") {
         throw httpError(501, "qq: pending message removal is unavailable");
@@ -1990,7 +2217,7 @@ export function createQqService(ctx, config) {
       const abortedFind = typeof finder?.abortCompile === "function"
         ? Boolean(finder.abortCompile(sessionId))
         : false;
-      const agent = await liveAgent(sessionId);
+      const agent = await liveChairAgent(sessionId);
       const wasRunning = agent.status === "running";
       agent.cancel({ kind: "user" }, { keepInbox: true });
       // Cancellation follows the DSH Host admission contract: return after the
@@ -2083,4 +2310,6 @@ export const internals = Object.freeze({
   contained,
   isImmediateChild,
   hostAgents,
+  adoptAgentHandle,
+  unwrapAgents,
 });
