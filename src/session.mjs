@@ -2204,7 +2204,8 @@ export function createQqService(ctx, config) {
       }
       const message = userMessage(line);
       const mode = agent.status === "running" ? "steer" : "followup";
-      notifyDirectUserMessage({ kind: "admitted", agent, message, mode });
+      const directUserTime = clock();
+      notifyDirectUserMessage({ kind: "admitted", agent, message, mode, time: directUserTime });
       try {
         if (mode === "steer") agent.steer(message);
         else agent.followup(message);
@@ -2235,7 +2236,7 @@ export function createQqService(ctx, config) {
       if (!inbox.replace(message.id, replacement)) {
         throw httpError(409, "qq: pending message is no longer available");
       }
-      notifyDirectUserMessage({ kind: "updated", agent, message: replacement, previous: message });
+      notifyDirectUserMessage({ kind: "updated", agent, message: replacement, previous: message, time: clock() });
       await sessions.flush(agent.session);
       return { accepted: true, messageId: replacement.id };
     },

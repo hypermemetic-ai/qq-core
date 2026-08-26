@@ -52,6 +52,7 @@
   config:
     path: !!js dshHomePath('session-query/session-history.sqlite')
     openAt: first-search
+    readWindowMax: 50
 
 # Architect owns fold on this profile. compact-basic must not auto-summarize
 # the talking session; qq-workflows chops fat tool dumps and folds by notes.
