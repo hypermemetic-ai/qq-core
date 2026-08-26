@@ -938,6 +938,11 @@ export function attachSessionHistory(ctx, { qq } = {}) {
     try { state.disposeTool?.(); } catch {}
   }
 
+  function revokeClaimAndActive(agent) {
+    claims.delete(agent);
+    revoke(agent);
+  }
+
   function revokeSession(session) {
     const agent = serviceOf(ctx, "agents")?.get?.(session?.id);
     if (agent) claims.delete(agent);
@@ -1084,9 +1089,9 @@ export function attachSessionHistory(ctx, { qq } = {}) {
     }));
     off.push(ctx.on("system-prompt/assemble", onAssemble));
     off.push(ctx.on("agent/pre-step", onPreStep));
-    off.push(ctx.on("agent/error", ({ agent } = {}) => revoke(agent)));
+    off.push(ctx.on("agent/error", ({ agent } = {}) => revokeClaimAndActive(agent)));
     off.push(ctx.on("agent/status", ({ agent, status } = {}) => {
-      if (status === "idle") revoke(agent);
+      if (status === "idle") revokeClaimAndActive(agent);
     }));
     off.push(ctx.on("agent/disposed", ({ agent } = {}) => {
       revoke(agent);
