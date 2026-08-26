@@ -1896,6 +1896,10 @@ export function createQqService(ctx, config) {
           const replaced = await replace(sessionId);
           return { kind: "navigate", action: "replace", ...replaced };
         }
+        if (name === "close") {
+          const closed = await close(sessionId);
+          return { kind: "navigate", action: "close", ...closed };
+        }
         if (name === "reopen" || name === "resume") {
           const target = line.split(/\s+/)[1] || sessionId;
           const targetId = resolveAlias(target) || target;
