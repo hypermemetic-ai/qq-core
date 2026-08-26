@@ -93,8 +93,8 @@ then slices message counts; it never scans a semantic session and never issues
 sequential event reads. `boundaries` reports whether each requested count was
 reached and distinguishes a session edge from the fixed raw-event bound. Each
 message has a 900-character cap, aggregate visible text has an 11,000-character
-budget, and the serialized result has a 16 KiB ceiling, with explicit target,
-boundary, and truncation markers.
+budget, and the serialized UTF-8 result has a 16 KiB byte ceiling, with explicit
+target, boundary, and truncation markers.
 
 Authorization is checked before prompt assembly and again at execution. Relay,
 plugin, transcript, or model text cannot grant access. A next-step steering

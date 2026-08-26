@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 
 export const FIND_SESSION_SKILL = "find-session";
@@ -18,7 +19,8 @@ const MAX_CONTEXT_WINDOW = 12;
 const CONTEXT_RAW_EVENT_BOUND = 50;
 const MAX_CONTEXT_MESSAGE_CHARS = 900;
 const MAX_CONTEXT_TEXT_CHARS = 11_000;
-const MAX_CONTEXT_OUTPUT_CHARS = 16_384;
+const MAX_CONTEXT_OUTPUT_BYTES = 16 * 1024;
+const TRUNCATION_MARKER = " [truncated]";
 const MAX_QUERY_CHARS = 500;
 const MAX_SNIPPET_CHARS = 320;
 const GRANT_ERROR = "session_history is not authorized for this agent turn";
@@ -121,35 +123,59 @@ function isoTime(value) {
 function compactText(value, maxChars) {
   const text = String(value ?? "").replaceAll(/\s+/g, " ").trim();
   if (text.length <= maxChars) return { text, truncated: false };
-  const marker = " [truncated]";
-  if (maxChars <= marker.length) {
+  if (maxChars <= TRUNCATION_MARKER.length) {
     return { text: text.slice(0, Math.max(0, maxChars)), truncated: true };
   }
   return {
-    text: `${text.slice(0, maxChars - marker.length).trimEnd()}${marker}`,
+    text: `${text.slice(0, maxChars - TRUNCATION_MARKER.length).trimEnd()}${TRUNCATION_MARKER}`,
     truncated: true,
   };
 }
 
+function contextOutputBytes(result) {
+  return Buffer.byteLength(JSON.stringify(result, null, 2), "utf8");
+}
+
+function truncationSource(event) {
+  if (event.truncated === true && event.text.endsWith(TRUNCATION_MARKER)) {
+    return event.text.slice(0, -TRUNCATION_MARKER.length).trimEnd();
+  }
+  return event.text;
+}
+
+function markedPrefix(codePoints, length) {
+  const prefix = codePoints.slice(0, length).join("").trimEnd();
+  return prefix ? `${prefix}${TRUNCATION_MARKER}` : TRUNCATION_MARKER.trimStart();
+}
+
 function enforceContextCeiling(result, targetSeq, messages) {
-  let overflow = JSON.stringify(result, null, 2).length - MAX_CONTEXT_OUTPUT_CHARS;
-  if (overflow <= 0) return;
+  if (contextOutputBytes(result) <= MAX_CONTEXT_OUTPUT_BYTES) return;
+  result.truncated = true;
   const candidates = [...messages].sort((left, right) => (
     (left.seq === targetSeq ? 1 : 0) - (right.seq === targetSeq ? 1 : 0)
     || Math.abs(right.seq - targetSeq) - Math.abs(left.seq - targetSeq)
   ));
   for (const event of candidates) {
-    if (overflow <= 0) break;
-    const reducible = Math.max(0, event.text.length - 1);
-    if (reducible === 0) continue;
-    const reduceBy = Math.min(reducible, overflow + 15);
-    const compact = compactText(event.text, Math.max(1, event.text.length - reduceBy));
-    event.text = compact.text;
+    if (contextOutputBytes(result) <= MAX_CONTEXT_OUTPUT_BYTES) break;
+    const codePoints = Array.from(truncationSource(event));
+    if (codePoints.length === 0) continue;
     event.truncated = true;
-    overflow = JSON.stringify(result, null, 2).length - MAX_CONTEXT_OUTPUT_CHARS;
+    event.text = markedPrefix(codePoints, 0);
+    if (contextOutputBytes(result) > MAX_CONTEXT_OUTPUT_BYTES) continue;
+
+    // Restore as much of this message as the exact serialized UTF-8 budget
+    // permits. Code-point slicing keeps surrogate pairs and JSON valid.
+    let low = 0;
+    let high = codePoints.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      event.text = markedPrefix(codePoints, middle);
+      if (contextOutputBytes(result) <= MAX_CONTEXT_OUTPUT_BYTES) low = middle;
+      else high = middle - 1;
+    }
+    event.text = markedPrefix(codePoints, low);
   }
-  result.truncated = true;
-  if (JSON.stringify(result, null, 2).length > MAX_CONTEXT_OUTPUT_CHARS) {
+  if (contextOutputBytes(result) > MAX_CONTEXT_OUTPUT_BYTES) {
     throw new Error("session_history could not satisfy its fixed context output ceiling");
   }
 }
@@ -925,7 +951,6 @@ export function attachSessionHistory(ctx, { qq } = {}) {
     if (event?.type !== "agent/inbox/spliced" || !Number.isSafeInteger(data?.removedCount) || data.removedCount < 1) {
       return;
     }
-    if (data.outcome === "canceled") return;
     const agents = serviceOf(ctx, "agents");
     const agent = agents?.get?.(session?.id);
     if (!agent) return;
@@ -933,6 +958,12 @@ export function attachSessionHistory(ctx, { qq } = {}) {
     if (!Array.isArray(list)) return;
     const removed = list.slice(data.start, data.start + data.removedCount);
     const admitted = admissionMap(agent);
+    if (data.outcome === "canceled") {
+      // Canceled removals never become a turn claim, but their authentic
+      // admission provenance is still one-shot and must not be replayable.
+      for (const message of removed) admitted?.delete(message?.id);
+      return;
+    }
     const trusted = [];
     for (const message of removed) {
       const record = admitted?.get(message?.id);
@@ -1094,7 +1125,10 @@ export const internals = Object.freeze({
   CONTEXT_RAW_EVENT_BOUND,
   MAX_CONTEXT_MESSAGE_CHARS,
   MAX_CONTEXT_TEXT_CHARS,
-  MAX_CONTEXT_OUTPUT_CHARS,
+  MAX_CONTEXT_OUTPUT_BYTES,
+  // Compatibility for tests/consumers of the initial implementation; the
+  // ceiling is now measured in bytes despite the legacy property name.
+  MAX_CONTEXT_OUTPUT_CHARS: MAX_CONTEXT_OUTPUT_BYTES,
   GESTURE,
   GRANT_ERROR,
   conversationText,
