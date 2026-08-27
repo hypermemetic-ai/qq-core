@@ -62,6 +62,17 @@
       ]
     },
     {
+      "name": "qq-wiki",
+      "label": "qq wiki",
+      "folders": [
+        {
+          "name": "qq-wiki",
+          "label": "qq wiki",
+          "path": "qq-wiki"
+        }
+      ]
+    },
+    {
       "name": "ytgrab",
       "label": "ytgrab",
       "folders": [
