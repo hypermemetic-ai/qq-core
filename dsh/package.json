@@ -3,5 +3,6 @@
   "private": true,
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.0-rc.7"
-  }
+  },
+  "version": "0.0.0"
 }
