@@ -17,7 +17,8 @@ mkdir -p "$sim/bin" "$scratch/home" "$scratch/config"
 cp "$root/bin/qq" "$sim/bin/qq"
 cp "$root/package.json" "$root/host.patch.yml" "$root/project-catalog.json" "$sim/"
 ln -s "$root/src" "$sim/src"
-ln -s "$root/dsh" "$sim/dsh"
+mkdir -p "$sim/dsh"
+cp "$root/dsh/package.json" "$root/dsh/package-lock.json" "$root/dsh/qq-dsh-model-compat.mjs" "$sim/dsh/"
 
 port=$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
 stop_host() {
