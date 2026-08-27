@@ -151,10 +151,11 @@ Configured multi-repository groups remain in `project-catalog.json`; all other
 immediate children are discovered as standalone projects. There is no `qq`
 catalog group.
 
-Run from the core repository:
+The default chair is `deepseek-official` / `deepseek-v4-flash`. Run from the
+core repository:
 
 ```bash
-export QWEN_TOKEN_PLAN_API_KEY='...'
+export DEEPSEEK_API_KEY='...'
 bin/qq
 ```
 

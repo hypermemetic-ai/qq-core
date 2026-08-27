@@ -10,8 +10,8 @@ state_root=${XDG_STATE_HOME:-"$HOME/.local/state"}
 export DSH_HOME=${QQ_DSH_HOME:-${DSH_HOME:-"$state_root/qq"}}
 export DSH_TELEMETRY_DISABLED=${DSH_TELEMETRY_DISABLED:-1}
 export QQ_PORT=${QQ_PORT:-3082}
-export QQ_DSH_PROVIDER=${QQ_DSH_PROVIDER:-qwen-token-plan}
-export QQ_DSH_MODEL=${QQ_DSH_MODEL:-deepseek-v4-pro-0813}
+export QQ_DSH_PROVIDER=${QQ_DSH_PROVIDER:-deepseek-official}
+export QQ_DSH_MODEL=${QQ_DSH_MODEL:-deepseek-v4-flash}
 
 mkdir -p -- "$DSH_HOME"
 chmod 700 "$DSH_HOME"

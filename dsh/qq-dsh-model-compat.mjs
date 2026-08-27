@@ -1,7 +1,7 @@
 import { QWEN_TOKEN_PLAN_MODELS } from "@earendil-works/pi-ai/providers/qwen-token-plan.models";
 
-const provider = process.env.QQ_DSH_PROVIDER ?? "qwen-token-plan";
-const model = process.env.QQ_DSH_MODEL ?? "deepseek-v4-pro-0813";
+const provider = process.env.QQ_DSH_PROVIDER;
+const model = process.env.QQ_DSH_MODEL;
 
 // The dated route is newer than the installed pi-ai catalog. Seed it
 // from the compatible Pro declaration before DSH resolves the profile so system

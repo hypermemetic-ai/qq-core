@@ -59,15 +59,11 @@
   config:
     auto: false
 
-# qq selects one real qwen-token-plan route rather than inheriting the base
-# bundle's DeepSeek default. The exact dated model is newer than the installed
-# pi-ai catalog, so this profile declares its current non-secret metadata while
-# inheriting qwen-token-plan's endpoint/protocol and referencing only its key.
 - id: agent-default-model
   name: '@deepseek-ai/dsh-agent-default-model'
   config:
-    provider: !!js process.env.QQ_DSH_PROVIDER ?? 'qwen-token-plan'
-    model: !!js process.env.QQ_DSH_MODEL ?? 'deepseek-v4-pro-0813'
+    provider: !!js process.env.QQ_DSH_PROVIDER ?? 'deepseek-official'
+    model: !!js process.env.QQ_DSH_MODEL ?? 'deepseek-v4-flash'
 
 - id: llm-pi-ai
   name: '@deepseek-ai/dsh-llm-pi-ai'
@@ -106,8 +102,8 @@
         # Operator projects live in project-catalog.json and are re-read on
         # every list. Alternate QQ_PROJECTS_ROOT values keep automatic
         # visible-folder discovery when that file's root does not match.
-        provider: !!js process.env.QQ_DSH_PROVIDER ?? 'qwen-token-plan'
-        model: !!js process.env.QQ_DSH_MODEL ?? 'deepseek-v4-pro-0813'
+        provider: !!js process.env.QQ_DSH_PROVIDER ?? 'deepseek-official'
+        model: !!js process.env.QQ_DSH_MODEL ?? 'deepseek-v4-flash'
         reasoningEffort: !!js process.env.QQ_DSH_REASONING_EFFORT
 
     # Missing siblings must not stop core from booting. `bin/qq` exports one

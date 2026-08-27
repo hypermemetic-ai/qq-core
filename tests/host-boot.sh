@@ -28,10 +28,10 @@ stop_host() {
 }
 boot() {
   local name=$1 state="$scratch/$1-state"
-  env HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/config" DSH_HOME="$state" \
+  env -u QQ_DSH_PROVIDER -u QQ_DSH_MODEL \
+    HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/config" DSH_HOME="$state" \
     npm_config_cache="$scratch/npm-cache" \
-    DSH_TELEMETRY_DISABLED=1 QWEN_TOKEN_PLAN_API_KEY=host-boot-probe \
-    QQ_DSH_PROVIDER=qwen-token-plan QQ_DSH_MODEL=deepseek-v4-pro-0813 \
+    DSH_TELEMETRY_DISABLED=1 \
     QQ_PORT="$port" QQ_PROJECTS_ROOT="$projects" QQ_DSH_CWD="$sim" \
     QQ_FIND_ROOT="$scratch/missing-image-finder" QQ_MEDIA_ROOT="$scratch/missing-media-box" \
     QQ_DSH_SESSION_ID=session-63a11000-0000-4000-8000-0000000000aa \
@@ -39,10 +39,11 @@ boot() {
   pid=$!
   for _ in {1..500}; do
     if ! kill -0 "$pid" 2>/dev/null; then cat "$scratch/$name.err" >&2; return 1; fi
-    [[ -f $state/profiles/qq/package.json ]] && grep -Fq 'qq: qwen-token-plan/deepseek-v4-pro-0813' "$scratch/$name.err" && break
+    [[ -f $state/profiles/qq/package.json ]] && grep -Fq 'qq: deepseek-official/deepseek-v4-flash' "$scratch/$name.err" && break
     sleep 0.05
   done
   [[ -f $state/profiles/qq/package.json ]] || { cat "$scratch/$name.err" >&2; return 1; }
+  grep -Fq 'qq: deepseek-official/deepseek-v4-flash' "$scratch/$name.err" || { cat "$scratch/$name.err" >&2; return 1; }
   sleep 0.5
   kill -0 "$pid"
 }

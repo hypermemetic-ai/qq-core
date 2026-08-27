@@ -50,7 +50,7 @@ const server = createServer((request, response) => {
         id: `chatcmpl-qq-dsh-${requestNumber}`,
         object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
-        model: parsed.model ?? "deepseek-v4-pro-0813",
+        model: parsed.model ?? "deepseek-v4-flash",
       };
       const writeToolCall = (id, name, args) => {
         response.write(`data: ${JSON.stringify({
