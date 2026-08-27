@@ -28,6 +28,7 @@ stop_host() {
 boot() {
   local name=$1 state="$scratch/$1-state"
   env HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/config" DSH_HOME="$state" \
+    npm_config_cache="$scratch/npm-cache" \
     DSH_TELEMETRY_DISABLED=1 QWEN_TOKEN_PLAN_API_KEY=host-boot-probe \
     QQ_DSH_PROVIDER=qwen-token-plan QQ_DSH_MODEL=deepseek-v4-pro-0813 \
     QQ_PORT="$port" QQ_PROJECTS_ROOT="$projects" QQ_DSH_CWD="$sim" \
