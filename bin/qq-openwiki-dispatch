@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+REGISTRY="${QQ_OPENWIKI_REGISTRY:-$ROOT/config/openwiki-repositories}"
+PROJECTS_ROOT="${QQ_OPENWIKI_PROJECTS_ROOT:-${HOME:?HOME is required}/projects}"
+PUBLISHED_REPO_KEY="${QQ_OPENWIKI_PUBLISHED_REPO_KEY:-qq}"
+PUBLISH_REFRESH_BIN="${QQ_OPENWIKI_REFRESH_BIN:-$ROOT/bin/qq-openwiki-refresh}"
+LEGACY_REFRESH_BIN="${QQ_OPENWIKI_LEGACY_REFRESH_BIN:-$ROOT/bin/qq-openwiki-refresh-legacy}"
+MAX_PARALLEL="${QQ_OPENWIKI_MAX_PARALLEL:-3}"
+
+if [[ ! "$PUBLISHED_REPO_KEY" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+  echo "Published OpenWiki repository key is malformed: $PUBLISHED_REPO_KEY" >&2
+  exit 1
+fi
+if [[ ! "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+  echo "QQ_OPENWIKI_MAX_PARALLEL must be a positive integer." >&2
+  exit 1
+fi
+if [[ ! -f "$REGISTRY" ]]; then
+  echo "OpenWiki repository registry is missing: $REGISTRY" >&2
+  exit 1
+fi
+
+repos=()
+keys=()
+refresh_bins=()
+while IFS= read -r entry || [[ -n "$entry" ]]; do
+  entry="${entry%%#*}"
+  entry="${entry#"${entry%%[![:space:]]*}"}"
+  entry="${entry%"${entry##*[![:space:]]}"}"
+  [[ -z "$entry" ]] && continue
+  if [[ "$entry" == /* ]]; then
+    repo="$entry"
+    key="$(basename -- "$entry")"
+  else
+    if [[ ! "$entry" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+      echo "Malformed OpenWiki repository entry: $entry" >&2
+      exit 1
+    fi
+    repo="$PROJECTS_ROOT/$entry"
+    key="$entry"
+  fi
+  if [[ ! "$key" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+    echo "Malformed OpenWiki repository key: $key" >&2
+    exit 1
+  fi
+  repo="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "OpenWiki repository is unavailable: $repo" >&2
+    exit 1
+  }
+  repos+=("$repo")
+  keys+=("$key")
+  if [[ "$key" == "$PUBLISHED_REPO_KEY" ]]; then
+    refresh_bins+=("$PUBLISH_REFRESH_BIN")
+  else
+    refresh_bins+=("$LEGACY_REFRESH_BIN")
+  fi
+done <"$REGISTRY"
+
+if (( ${#repos[@]} == 0 )); then
+  echo "OpenWiki repository registry is empty." >&2
+  exit 1
+fi
+
+pids=()
+pid_keys=()
+failures=0
+
+wait_first() {
+  local pid="${pids[0]}" key="${pid_keys[0]}"
+  if wait "$pid"; then
+    echo "[$key] OpenWiki refresh complete."
+  else
+    echo "[$key] OpenWiki refresh failed." >&2
+    failures=$((failures + 1))
+  fi
+  pids=("${pids[@]:1}")
+  pid_keys=("${pid_keys[@]:1}")
+}
+
+for index in "${!repos[@]}"; do
+  repo="${repos[$index]}"
+  key="${keys[$index]}"
+  refresh_bin="${refresh_bins[$index]}"
+  (
+    echo "[$key] Starting OpenWiki refresh."
+    QQ_OPENWIKI_MAIN_ROOT="$repo" QQ_OPENWIKI_REPO_KEY="$key" "$refresh_bin" 2>&1 \
+      | sed -u "s/^/[$key] /"
+  ) &
+  pids+=("$!")
+  pid_keys+=("$key")
+  if (( ${#pids[@]} >= MAX_PARALLEL )); then wait_first; fi
+done
+while (( ${#pids[@]} > 0 )); do wait_first; done
+
+if (( failures > 0 )); then
+  echo "$failures OpenWiki refresh(es) failed." >&2
+  exit 1
+fi

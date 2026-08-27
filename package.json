@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Presentation-neutral Cordis service over DSH Agents and sessions.",
+  "description": "Presentation-neutral DSH session service and daily host.",
   "main": "src/plugin.mjs",
   "exports": {
     ".": "./src/plugin.mjs",
@@ -19,6 +19,12 @@
   },
   "files": [
     "src/",
+    "bin/",
+    "config/",
+    "dsh/",
+    "openwiki/",
+    "systemd/",
+    "host.patch.yml",
     "project-catalog.json",
     "README.md"
   ],

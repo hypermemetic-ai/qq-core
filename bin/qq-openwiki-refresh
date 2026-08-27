@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+MAIN_ROOT="${QQ_OPENWIKI_MAIN_ROOT:-$ROOT}"
+MAIN_BRANCH="${QQ_OPENWIKI_MAIN_BRANCH:-main}"
+PUBLISHED_REPO_KEY="${QQ_OPENWIKI_PUBLISHED_REPO_KEY:-qq}"
+OPENWIKI_BIN="${QQ_OPENWIKI_BIN:-openwiki}"
+PUBLISH_BIN="${QQ_OPENWIKI_PUBLISH_BIN:-$ROOT/bin/qq-openwiki-publish}"
+MATERIALIZE_BIN="${QQ_OPENWIKI_MATERIALIZE_BIN:-$ROOT/bin/qq-openwiki-materialize}"
+PROMPT="${QQ_OPENWIKI_PROMPT:-Keep this wiki short and practical.}"
+ACTION="${QQ_OPENWIKI_ACTION:-auto}"
+
+MAIN_ROOT="$(git -C "$MAIN_ROOT" rev-parse --show-toplevel)"
+REPO_KEY="${QQ_OPENWIKI_REPO_KEY:-$(basename -- "$MAIN_ROOT")}"
+if [[ ! "$REPO_KEY" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+  echo "OpenWiki repository key is malformed: $REPO_KEY" >&2
+  exit 1
+fi
+if [[ "$REPO_KEY" != "$PUBLISHED_REPO_KEY" ]]; then
+  echo "OpenWiki main publication is enabled only for $PUBLISHED_REPO_KEY, not $REPO_KEY." >&2
+  exit 1
+fi
+case "$ACTION" in auto|init|update) ;; *) echo "OpenWiki action must be auto, init, or update." >&2; exit 1 ;; esac
+
+current_branch="$(git -C "$MAIN_ROOT" symbolic-ref --quiet --short HEAD)"
+if [[ "$current_branch" != "$MAIN_BRANCH" ]]; then
+  echo "OpenWiki source checkout is on $current_branch, not $MAIN_BRANCH." >&2
+  exit 1
+fi
+if ! git -C "$MAIN_ROOT" show-ref --verify --quiet "refs/heads/$MAIN_BRANCH"; then
+  echo "OpenWiki source branch does not exist: $MAIN_BRANCH" >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$MAIN_ROOT" status --porcelain --untracked-files=all)" ]]; then
+  echo "OpenWiki will not publish from a dirty $MAIN_BRANCH checkout." >&2
+  exit 1
+fi
+"$MATERIALIZE_BIN" freeze "$MAIN_ROOT"
+
+COMMON_DIR="$(git -C "$MAIN_ROOT" rev-parse --path-format=absolute --git-common-dir)"
+exec 9>"$COMMON_DIR/qq-openwiki-refresh.lock"
+if ! flock -n 9; then
+  echo "OpenWiki refresh is already running."
+  exit 0
+fi
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/qq-openwiki-refresh.XXXXXX")"
+project="$work/project"
+cleanup() {
+  if [[ -d "$work" ]]; then chmod -R u+w -- "$work" 2>/dev/null || true; fi
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
+
+git clone --quiet --local --single-branch --branch "$MAIN_BRANCH" -- "$MAIN_ROOT" "$project"
+git -C "$project" remote remove origin
+source_ref="$(git -C "$project" rev-parse HEAD)"
+
+if [[ "$ACTION" == auto ]]; then
+  if [[ -f "$project/openwiki/.last-update.json" ]]; then ACTION=update; else ACTION=init; fi
+fi
+
+(
+  cd -- "$project"
+  env \
+    -u QQ_OPENWIKI_MAIN_ROOT \
+    -u QQ_OPENWIKI_MAIN_BRANCH \
+    "$OPENWIKI_BIN" code "--$ACTION" --print "$PROMPT"
+)
+if [[ ! -d "$project/openwiki" || -L "$project/openwiki" ]]; then
+  echo "OpenWiki did not produce a regular output directory." >&2
+  exit 1
+fi
+if find "$project/openwiki" -mindepth 1 ! -type d ! -type f -print -quit | grep -q .; then
+  echo "Generated OpenWiki output contains a non-file entry." >&2
+  exit 1
+fi
+
+# Upstream may stage or commit its setup files. Anchor the writer commit to the
+# cloned main revision and stage only generated output.
+git -C "$project" reset --quiet --mixed "$source_ref"
+git -C "$project" add -f -A -- openwiki
+if git -C "$project" diff --cached --quiet --exit-code; then
+  current_branch="$(git -C "$MAIN_ROOT" symbolic-ref --quiet --short HEAD)"
+  if [[ "$current_branch" != "$MAIN_BRANCH" ]] \
+    || [[ -n "$(git -C "$MAIN_ROOT" status --porcelain --untracked-files=all)" ]]; then
+    echo "OpenWiki output is unchanged but $MAIN_BRANCH is no longer ready; refresh deferred." >&2
+    exit 1
+  fi
+  echo "OpenWiki is already current."
+  exit 0
+fi
+
+git_name="$(git -C "$MAIN_ROOT" config user.name)"
+git_email="$(git -C "$MAIN_ROOT" config user.email)"
+git -C "$project" config user.name "$git_name"
+git -C "$project" config user.email "$git_email"
+git -C "$project" diff --cached --check -- openwiki
+git -C "$project" commit --quiet -m "Refresh OpenWiki"
+writer_ref="$(git -C "$project" rev-parse HEAD)"
+
+mapfile -d '' changed_paths < <(git -C "$project" diff-tree --no-commit-id --name-only -r -z "$source_ref" "$writer_ref" --)
+for path in "${changed_paths[@]}"; do
+  case "$path" in
+    openwiki/*) ;;
+    *)
+      echo "OpenWiki writer commit changed a non-generated path: $path" >&2
+      exit 1
+      ;;
+  esac
+done
+if (( ${#changed_paths[@]} == 0 )); then
+  echo "OpenWiki writer commit is empty." >&2
+  exit 1
+fi
+if git -C "$project" ls-tree -r --format='%(objectmode) %(objecttype)' "$writer_ref" -- openwiki \
+  | grep -Evq '^100644 blob$'; then
+  echo "OpenWiki writer commit contains a non-read-only file mode." >&2
+  exit 1
+fi
+
+"$PUBLISH_BIN" "$REPO_KEY" "$project" "$writer_ref"

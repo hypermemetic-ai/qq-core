@@ -1,0 +1,38 @@
+#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { readExecutionPolicy } from "./lib/execution-profiles.mjs";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const PROVIDERS = new Map([["openai-codex", "openai-chatgpt"]]);
+
+async function main() {
+  const { openwiki } = await readExecutionPolicy();
+  const provider = PROVIDERS.get(openwiki.provider);
+  if (!provider) {
+    throw new Error(`openwiki provider cannot be honored: ${openwiki.provider}`);
+  }
+  if (openwiki.effort !== "medium") {
+    throw new Error(`openwiki effort cannot be honored: ${openwiki.effort}; only medium is supported`);
+  }
+
+  const dispatcher = process.env.QQ_OPENWIKI_DISPATCH_BIN || join(ROOT, "bin", "qq-openwiki-dispatch");
+  const result = spawnSync(dispatcher, [], {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      OPENWIKI_PROVIDER: provider,
+      OPENWIKI_MODEL_ID: openwiki.model,
+    },
+  });
+  if (result.error) throw new Error(`cannot run OpenWiki dispatcher: ${result.error.message}`);
+  if (result.signal) throw new Error(`OpenWiki dispatcher terminated by ${result.signal}`);
+  process.exitCode = result.status ?? 1;
+}
+
+main().catch((error) => {
+  console.error(`qq-openwiki-service: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
+});

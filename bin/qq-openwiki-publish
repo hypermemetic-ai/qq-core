@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+MAIN_ROOT="${QQ_OPENWIKI_MAIN_ROOT:-$ROOT}"
+MAIN_BRANCH="${QQ_OPENWIKI_MAIN_BRANCH:-main}"
+PUBLISHED_REPO_KEY="${QQ_OPENWIKI_PUBLISHED_REPO_KEY:-qq}"
+MATERIALIZE_BIN="${QQ_OPENWIKI_MATERIALIZE_BIN:-$ROOT/bin/qq-openwiki-materialize}"
+
+if (( $# != 3 )); then
+  echo "usage: qq-openwiki-publish REPOSITORY_KEY WRITER_REPOSITORY WRITER_COMMIT" >&2
+  exit 2
+fi
+key="$1"
+writer_repository="$2"
+writer_commit="$3"
+if [[ ! "$key" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+  echo "OpenWiki repository key is malformed: $key" >&2
+  exit 1
+fi
+if [[ "$key" != "$PUBLISHED_REPO_KEY" ]]; then
+  echo "OpenWiki main publication is enabled only for $PUBLISHED_REPO_KEY, not $key." >&2
+  exit 1
+fi
+
+MAIN_ROOT="$(git -C "$MAIN_ROOT" rev-parse --show-toplevel)"
+writer_repository="$(git -C "$writer_repository" rev-parse --show-toplevel)"
+writer_ref="$(git -C "$writer_repository" rev-parse --verify "$writer_commit^{commit}")"
+if [[ "$(git -C "$writer_repository" rev-parse "refs/heads/$MAIN_BRANCH")" != "$writer_ref" ]]; then
+  echo "OpenWiki writer commit is not the tip of $MAIN_BRANCH." >&2
+  exit 1
+fi
+read -r -a writer_line <<<"$(git -C "$writer_repository" rev-list --parents --max-count=1 "$writer_ref")"
+if (( ${#writer_line[@]} != 2 )); then
+  echo "OpenWiki writer commit must have exactly one parent." >&2
+  exit 1
+fi
+writer_parent="${writer_line[1]}"
+if ! git -C "$MAIN_ROOT" cat-file -e "$writer_parent^{commit}" 2>/dev/null; then
+  echo "OpenWiki writer parent is not from the main repository." >&2
+  exit 1
+fi
+
+mapfile -d '' changed_paths < <(git -C "$writer_repository" diff-tree --no-commit-id --name-only -r -z "$writer_parent" "$writer_ref" --)
+if (( ${#changed_paths[@]} == 0 )); then
+  echo "OpenWiki writer commit is empty." >&2
+  exit 1
+fi
+for path in "${changed_paths[@]}"; do
+  case "$path" in
+    openwiki/*) ;;
+    *)
+      echo "OpenWiki writer commit changed a non-generated path: $path" >&2
+      exit 1
+      ;;
+  esac
+done
+if git -C "$writer_repository" ls-tree -r --format='%(objectmode) %(objecttype)' "$writer_ref" -- openwiki \
+  | grep -Evq '^100644 blob$'; then
+  echo "OpenWiki writer commit contains a non-read-only file mode." >&2
+  exit 1
+fi
+
+COMMON_DIR="$(git -C "$MAIN_ROOT" rev-parse --path-format=absolute --git-common-dir)"
+exec 8>"$COMMON_DIR/qq-land.lock"
+flock 8
+
+current_branch="$(git -C "$MAIN_ROOT" symbolic-ref --quiet --short HEAD)"
+if [[ "$current_branch" != "$MAIN_BRANCH" ]]; then
+  echo "OpenWiki main checkout moved to $current_branch before publication." >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$MAIN_ROOT" status --porcelain --untracked-files=all)" ]]; then
+  echo "OpenWiki generated $writer_ref but $MAIN_BRANCH is dirty; publication deferred." >&2
+  exit 1
+fi
+current_main="$(git -C "$MAIN_ROOT" rev-parse HEAD)"
+if ! git -C "$MAIN_ROOT" merge-base --is-ancestor "$writer_parent" "$current_main"; then
+  echo "OpenWiki writer is no longer based on $MAIN_BRANCH history." >&2
+  exit 1
+fi
+
+read -r upstream_remote upstream_ref < <(
+  git -C "$MAIN_ROOT" for-each-ref --count=1 \
+    --format='%(upstream:remotename) %(upstream:remoteref)' "refs/heads/$MAIN_BRANCH"
+)
+if [[ -z "${upstream_remote:-}" || -z "${upstream_ref:-}" ]]; then
+  echo "OpenWiki target branch $MAIN_BRANCH has no upstream." >&2
+  exit 1
+fi
+
+# Validate against the current main revision in the disposable clone first, so
+# a conflict cannot alter the live repository even at the object/ref level.
+git -C "$writer_repository" fetch --quiet --no-write-fetch-head \
+  "$MAIN_ROOT" "refs/heads/$MAIN_BRANCH"
+if ! git -C "$writer_repository" merge-tree --write-tree "$current_main" "$writer_ref" >/dev/null; then
+  echo "OpenWiki generated $writer_ref but it no longer merges cleanly." >&2
+  exit 1
+fi
+if [[ "$(git -C "$MAIN_ROOT" rev-parse HEAD)" != "$current_main" ]] \
+  || [[ -n "$(git -C "$MAIN_ROOT" status --porcelain --untracked-files=all)" ]]; then
+  echo "OpenWiki main checkout changed during publication; publication deferred." >&2
+  exit 1
+fi
+
+# Import only the validated writer object graph, then perform the single live
+# merge and push while sharing the same short lock as qq land.
+git -C "$MAIN_ROOT" fetch --quiet --no-write-fetch-head \
+  "$writer_repository" "refs/heads/$MAIN_BRANCH"
+if [[ "$(git -C "$MAIN_ROOT" rev-parse HEAD)" != "$current_main" ]] \
+  || [[ -n "$(git -C "$MAIN_ROOT" status --porcelain --untracked-files=all)" ]]; then
+  echo "OpenWiki main checkout changed during publication; publication deferred." >&2
+  exit 1
+fi
+if ! git -C "$MAIN_ROOT" merge-tree --write-tree "$current_main" "$writer_ref" >/dev/null; then
+  echo "OpenWiki generated $writer_ref but it no longer merges cleanly." >&2
+  exit 1
+fi
+
+thawed=true
+refreeze_on_exit() {
+  status=$?
+  trap - EXIT
+  if [[ "$thawed" == true ]] && ! "$MATERIALIZE_BIN" freeze "$MAIN_ROOT"; then
+    echo "OpenWiki could not restore read-only materialization." >&2
+    status=1
+  fi
+  exit "$status"
+}
+trap refreeze_on_exit EXIT
+"$MATERIALIZE_BIN" thaw "$MAIN_ROOT"
+if ! git -C "$MAIN_ROOT" merge --quiet --no-ff --no-edit "$writer_ref"; then
+  if git -C "$MAIN_ROOT" rev-parse --verify --quiet MERGE_HEAD >/dev/null; then
+    git -C "$MAIN_ROOT" merge --abort >/dev/null 2>&1 || true
+  fi
+  echo "OpenWiki merge failed; publication deferred." >&2
+  exit 1
+fi
+"$MATERIALIZE_BIN" freeze "$MAIN_ROOT"
+thawed=false
+merge_ref="$(git -C "$MAIN_ROOT" rev-parse HEAD)"
+git -C "$MAIN_ROOT" push --quiet "$upstream_remote" "$merge_ref:$upstream_ref"
+printf 'Merged and pushed OpenWiki writer %s as %s on %s.\n' "$writer_ref" "$merge_ref" "$MAIN_BRANCH"

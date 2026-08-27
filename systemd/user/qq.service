@@ -1,0 +1,19 @@
+[Unit]
+Description=qq core DSH host
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/qq-core
+ExecStart=%h/projects/qq-core/bin/qq
+Restart=on-failure
+RestartSec=2
+UMask=0077
+Environment=QQ_DSH_PROVIDER=xai-auth
+Environment=QQ_DSH_MODEL=grok-4.6
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.opencode/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=append:%h/.local/state/qq/host.log
+StandardError=append:%h/.local/state/qq/host.log
+
+[Install]
+WantedBy=default.target

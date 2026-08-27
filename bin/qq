@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$root"
+
+: "${HOME:?qq: HOME is required}"
+state_root=${XDG_STATE_HOME:-"$HOME/.local/state"}
+# Runtime profile names and state paths retain qq until their separate migration.
+export DSH_HOME=${QQ_DSH_HOME:-${DSH_HOME:-"$state_root/qq"}}
+export DSH_TELEMETRY_DISABLED=${DSH_TELEMETRY_DISABLED:-1}
+export QQ_PORT=${QQ_PORT:-3082}
+export QQ_DSH_PROVIDER=${QQ_DSH_PROVIDER:-qwen-token-plan}
+export QQ_DSH_MODEL=${QQ_DSH_MODEL:-deepseek-v4-pro-0813}
+
+mkdir -p -- "$DSH_HOME"
+chmod 700 "$DSH_HOME"
+
+has_qwen_credential_file() {
+  local file=$1 kind=$2
+  [[ -f $file ]] || return 1
+  if [[ $kind == yaml ]]; then
+    grep -Eq '^[[:space:]]*QWEN_TOKEN_PLAN_API_KEY[[:space:]]*:[[:space:]]*[^[:space:]]' "$file"
+  else
+    grep -Eq '^[[:space:]]*(export[[:space:]]+)?QWEN_TOKEN_PLAN_API_KEY[[:space:]]*=' "$file"
+  fi
+}
+
+auth_ext=json
+case $QQ_DSH_PROVIDER in
+  qwen-token-plan)
+    if [[ -z ${QWEN_TOKEN_PLAN_API_KEY:-} ]] &&
+      ! has_qwen_credential_file "$DSH_HOME/.credentials.yaml" yaml &&
+      ! has_qwen_credential_file "$root/.env" env &&
+      ! has_qwen_credential_file "$DSH_HOME/.env" env; then
+      cat >&2 <<EOF_AUTH
+qq: qwen-token-plan requires QWEN_TOKEN_PLAN_API_KEY.
+Export it before starting, or store it under that name in:
+  $DSH_HOME/.credentials.yaml  (chmod 600)
+
+The launcher uses DSH's public credential-reference seam. It does not read
+or copy Pi credentials.
+EOF_AUTH
+      exit 2
+    fi
+    ;;
+  xai-auth)
+    [[ -f $DSH_HOME/.qq-grok-auth.$auth_ext ]] || {
+      printf 'qq: xai-auth requires a Grok login on this host (qq-login grok).\n' >&2
+      exit 2
+    }
+    ;;
+  openai-codex)
+    [[ -f $DSH_HOME/.qq-codex-auth.$auth_ext ]] || {
+      printf 'qq: openai-codex requires a Codex login on this host (qq-login codex).\n' >&2
+      exit 2
+    }
+    ;;
+esac
+
+toolchain="$root/dsh"
+dsh="$toolchain/node_modules/.bin/dsh"
+if [[ ! -x $dsh ]]; then
+  printf 'qq: installing pinned DSH toolchain\n' >&2
+  npm ci --prefix "$toolchain" --no-audit --no-fund
+fi
+
+# Core is always loaded from this repository root. Only these named sibling
+# repositories are host parts; missing siblings simply remove that capability.
+export QQ_DSH_HAVE_UI=0 QQ_DSH_HAVE_RELAY=0 QQ_DSH_HAVE_WORKFLOWS=0
+sibling_parent=$(cd -- "$root/.." && pwd -P)
+linked_roots=()
+add_named_sibling() {
+  local name=$1 package=$2 flag=${3:-}
+  local path="$sibling_parent/$name"
+  [[ -f $path/package.json ]] || return 0
+  node -e 'const p=require(process.argv[1]); if(p.name!==process.argv[2]) process.exit(1)' \
+    "$path/package.json" "$package" || {
+      printf 'qq: refusing sibling %s with unexpected package identity\n' "$path" >&2
+      exit 2
+    }
+  linked_roots+=("$(cd -- "$path" && pwd -P)")
+  if [[ -n $flag ]]; then
+    printf -v "$flag" 1
+    export "$flag"
+  fi
+}
+add_named_sibling qq-ui '@hypermemetic-ai/qq-ui' QQ_DSH_HAVE_UI
+add_named_sibling qq-workflows '@hypermemetic-ai/qq-workflows' QQ_DSH_HAVE_WORKFLOWS
+add_named_sibling qq-models '@hypermemetic-ai/qq-models'
+add_named_sibling qq-relay '@hypermemetic-ai/qq-relay' QQ_DSH_HAVE_RELAY
+add_named_sibling qq-dictation '@hypermemetic-ai/qq-dictation'
+
+add_optional_sibling() {
+  local path=$1 package=$2
+  [[ -f $path/package.json ]] || return 0
+  node -e 'const p=require(process.argv[1]); if(p.name!==process.argv[2]) process.exit(1)' \
+    "$path/package.json" "$package" || return 0
+  linked_roots+=("$(cd -- "$path" && pwd -P)")
+}
+add_optional_sibling "${QQ_FIND_ROOT:-$sibling_parent/image-finder}" '@hypermemetic-ai/image-finder'
+add_optional_sibling "${QQ_MEDIA_ROOT:-$sibling_parent/media-box}" '@hypermemetic-ai/media-box'
+
+# HMR watches exactly the source package roots linked into this profile.
+hmr_roots=("$root" ${linked_roots[@]+"${linked_roots[@]}"})
+export QQ_DSH_HMR_ROOTS=$(IFS=:; printf '%s' "${hmr_roots[*]}")
+
+profile_manifest="$DSH_HOME/profiles/qq/package.json"
+if ! node - "$profile_manifest" "$root" ${linked_roots[@]+"${linked_roots[@]}"} <<'NODE'
+const { existsSync, readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const [manifestPath, corePath, ...siblingPaths] = process.argv.slice(2);
+const packages = [["@hypermemetic-ai/qq", corePath]];
+for (const siblingPath of siblingPaths) {
+  const pkg = JSON.parse(readFileSync(join(siblingPath, "package.json"), "utf8"));
+  packages.push([pkg.name, siblingPath]);
+}
+const managed = new Set([
+  "@hypermemetic-ai/qq", "@hypermemetic-ai/qq-ui", "@hypermemetic-ai/qq-workflows",
+  "@hypermemetic-ai/qq-models", "@hypermemetic-ai/qq-relay",
+  "@hypermemetic-ai/qq-dictation", "@hypermemetic-ai/image-finder",
+  "@hypermemetic-ai/media-box",
+]);
+try {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const deps = manifest.dependencies ?? {};
+  const expected = new Map(packages);
+  const linked = (name, path) => deps[name] === `link:${path}` || deps[name] === `file:${path}`;
+  for (const [name, path] of expected) if (!linked(name, path)) process.exit(1);
+  for (const name of managed) if (!expected.has(name) && deps[name] !== undefined) process.exit(1);
+  for (const [name, target] of Object.entries(deps)) {
+    if (name.startsWith("@hypermemetic-ai/") && /^(?:file|link):/.test(String(target)) && !expected.has(name)) process.exit(1);
+  }
+} catch {
+  process.exit(1);
+}
+NODE
+then
+  printf 'qq: preparing persistent DSH profile\n' >&2
+  rm -rf -- "$DSH_HOME/profiles/qq"
+  "$dsh" plugin --profile qq add "$root"
+  for sibling in ${linked_roots[@]+"${linked_roots[@]}"}; do
+    "$dsh" plugin --profile qq add "$sibling"
+  done
+fi
+
+session_file="$DSH_HOME/qq.session"
+if [[ -n ${QQ_DSH_SESSION_ID:-} ]]; then
+  session_id=$QQ_DSH_SESSION_ID
+elif [[ -f $session_file ]]; then
+  session_id=$(<"$session_file")
+else
+  session_id="session-$(node -e 'console.log(crypto.randomUUID())')"
+fi
+if [[ ! $session_id =~ ^session-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+  printf 'qq: invalid session id in QQ_DSH_SESSION_ID or %s\n' "$session_file" >&2
+  exit 2
+fi
+if [[ ! -f $session_file ]]; then
+  umask 077
+  printf '%s\n' "$session_id" >"$session_file"
+fi
+export QQ_DSH_SESSION_ID=$session_id
+
+# The core operator seat is this repository. Project-session creation replaces
+# it with the exact selected sibling repository root.
+export QQ_DSH_CWD=${QQ_DSH_CWD:-$root}
+export QQ_PROJECTS_ROOT=${QQ_PROJECTS_ROOT:-$sibling_parent}
+
+printf 'qq: %s/%s · %s\n' "$QQ_DSH_PROVIDER" "$QQ_DSH_MODEL" "$QQ_DSH_SESSION_ID" >&2
+printf 'qq: state %s · http://127.0.0.1:%s/qq\n' "$DSH_HOME" "$QQ_PORT" >&2
+exec node --import "$toolchain/qq-dsh-model-compat.mjs" "$dsh" --profile qq --patch "$root/host.patch.yml" "$@"

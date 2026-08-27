@@ -1,0 +1,7 @@
+{
+  "name": "qq-dsh-toolchain",
+  "private": true,
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.7"
+  }
+}

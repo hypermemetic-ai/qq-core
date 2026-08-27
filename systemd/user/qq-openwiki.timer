@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh qq OpenWiki at 04:00, 12:00, and 20:00 local time
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+OnCalendar=*-*-* 12:00:00
+OnCalendar=*-*-* 20:00:00
+AccuracySec=1s
+Persistent=false
+Unit=qq-openwiki.service
+
+[Install]
+WantedBy=timers.target

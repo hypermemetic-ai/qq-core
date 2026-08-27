@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+unit_src=$root/systemd/user/qq.service
+unit_dst=${QQ_HOST_SERVICE:-$HOME/.config/systemd/user/qq.service}
+
+[[ -f $unit_src ]] || {
+  printf 'qq-host-activate: missing %s\n' "$unit_src" >&2
+  exit 1
+}
+
+mkdir -p -- "$(dirname -- "$unit_dst")"
+install -m 0644 "$unit_src" "$unit_dst"
+systemctl --user daemon-reload
+systemctl --user enable qq.service
+systemctl --user restart qq.service
+systemctl --user --no-pager --full status qq.service

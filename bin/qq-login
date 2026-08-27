@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+: "${HOME:?qq: HOME is required}"
+state_root=${XDG_STATE_HOME:-"$HOME/.local/state"}
+export DSH_HOME=${QQ_DSH_HOME:-${DSH_HOME:-"$state_root/qq"}}
+models_root=${QQ_MODELS_ROOT:-"$root/../qq-models"}
+[[ -f $models_root/bin/login.mjs ]] || {
+  printf 'qq-login: qq-models sibling is not installed at %s\n' "$models_root" >&2
+  exit 2
+}
+exec node "$models_root/bin/login.mjs" "$@"
