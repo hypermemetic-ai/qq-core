@@ -62,17 +62,6 @@
       ]
     },
     {
-      "name": "qq-pi",
-      "label": "qq pi",
-      "folders": [
-        {
-          "name": "qq-pi",
-          "label": "qq pi",
-          "path": "qq-pi"
-        }
-      ]
-    },
-    {
       "name": "ytgrab",
       "label": "ytgrab",
       "folders": [
