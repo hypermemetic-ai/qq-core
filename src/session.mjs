@@ -438,16 +438,7 @@ export function resolveProjectsRoot(value, env = process.env) {
  * folders. Without one, visible immediate directories are treated as
  * one-folder projects. Symlinks may never leave projectsRoot.
  */
-export function listProjectCatalog(projectsRoot, registration) {
-  const root = canonicalPath(projectsRoot, "projectsRoot");
-  const registrations = configuredCatalog(root, registration);
-  if (registrations) {
-    try {
-      return listRegisteredProjects(root, registrations);
-    } catch (error) {
-      if (!registration?.implicit) throw error;
-    }
-  }
+function listImmediateChildProjects(root) {
   let entries;
   try {
     entries = readdirSync(root, { withFileTypes: true });
@@ -485,6 +476,25 @@ export function listProjectCatalog(projectsRoot, registration) {
       grouped: false,
     });
   }
+  return projects;
+}
+
+export function listProjectCatalog(projectsRoot, registration) {
+  const root = canonicalPath(projectsRoot, "projectsRoot");
+  const registrations = configuredCatalog(root, registration);
+  let registered = [];
+  if (registrations) {
+    try {
+      registered = listRegisteredProjects(root, registrations);
+    } catch (error) {
+      if (!registration?.implicit) throw error;
+    }
+  }
+  const claimed = new Set(registered.flatMap((project) =>
+    (project.folders ?? [project]).map((folder) => folder.cwd),
+  ));
+  const discovered = listImmediateChildProjects(root).filter((project) => !claimed.has(project.cwd));
+  const projects = [...registered, ...discovered];
   projects.sort((left, right) => left.name.localeCompare(right.name) || left.cwd.localeCompare(right.cwd));
   return projects;
 }

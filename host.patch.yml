@@ -1,15 +1,14 @@
-# qq host attach recipe. `bin/qq` applies this list as a --patch overlay over
-# the pinned dsh-base bundle, so qq plus the sibling qq plugins present on disk
-# compose in one host process. This is the attach recipe, not a second product;
-# each sibling is bound only when its tree is present.
+# Core host attach recipe. `bin/qq` applies this as a --patch overlay over the
+# pinned dsh-base bundle. Core and whichever named sibling repositories are
+# present compose in one process; no containing qq checkout is required.
 
 - id: system-prompt
   config:
     persona: >-
       You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
 
-# DSH/Cordis owns plugin-fiber reload. Watch the qq tree plus bound sibling
-# plugins; a changed plugin is disposed through its reversible effects and
+# DSH/Cordis owns plugin-fiber reload. Watch core plus the bound sibling
+# package roots; a changed plugin is disposed through its reversible effects and
 # re-applied without restarting the host or its other fibers. Agent create
 # and resume bind to the host root, so HMR must not abort in-flight turns.
 # Tools re-register on the still-living Agents; an in-flight tool may error.
@@ -111,7 +110,7 @@
         model: !!js process.env.QQ_DSH_MODEL ?? 'deepseek-v4-pro-0813'
         reasoningEffort: !!js process.env.QQ_DSH_REASONING_EFFORT
 
-    # Missing siblings must not stop qq from booting. `bin/qq` exports one
+    # Missing siblings must not stop core from booting. `bin/qq` exports one
     # HAVE flag per present sibling; the matching insert stays disabled when
     # the directory is absent.
     - id: qq-relay

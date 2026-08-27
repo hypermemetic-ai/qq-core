@@ -5,69 +5,82 @@
       "name": "deciq",
       "label": "deciq",
       "folders": [
-        { "name": "core", "label": "core", "path": "deciq" },
-        { "name": "logic", "label": "logic", "path": "deciq-logic" }
+        {
+          "name": "core",
+          "label": "core",
+          "path": "deciq"
+        },
+        {
+          "name": "logic",
+          "label": "logic",
+          "path": "deciq-logic"
+        }
       ]
     },
     {
       "name": "discuss",
       "label": "discuss",
       "folders": [
-        { "name": "discuss", "label": "discuss", "path": "discuss" }
+        {
+          "name": "discuss",
+          "label": "discuss",
+          "path": "discuss"
+        }
       ]
     },
     {
       "name": "everything-box",
       "label": "everything box",
       "folders": [
-        { "name": "everything-box", "label": "everything box", "path": "everything-box" }
+        {
+          "name": "everything-box",
+          "label": "everything box",
+          "path": "everything-box"
+        }
       ]
     },
     {
       "name": "inference-box",
       "label": "inference box",
       "folders": [
-        { "name": "inference-box", "label": "inference box", "path": "inference-box" }
+        {
+          "name": "inference-box",
+          "label": "inference box",
+          "path": "inference-box"
+        }
       ]
     },
     {
       "name": "media-box",
       "label": "media box",
       "folders": [
-        { "name": "media-box", "label": "media box", "path": "media-box" }
-      ]
-    },
-    {
-      "name": "qq",
-      "label": "qq",
-      "path": "qq",
-      "folders": [
-        { "name": "core", "label": "core", "path": "qq/core" },
-        { "name": "ui", "label": "ui", "path": "qq/qq-ui" },
-        { "name": "workflows", "label": "workflows", "path": "qq/qq-workflows" },
-        { "name": "tasks", "label": "tasks", "path": "qq/qq-tasks" },
-        { "name": "models", "label": "models", "path": "qq/qq-models" },
-        { "name": "dsh-relay", "label": "dsh relay", "path": "qq/qq-relay" },
-        { "name": "dsh-dictation", "label": "dsh dictation", "path": "qq/qq-dictation" },
-        { "name": "relay", "label": "relay", "path": "qq-relay" },
-        { "name": "dictation", "label": "dictation", "path": "qq-dictation" },
-        { "name": "newspaper", "label": "newspaper", "path": "qq-newspaper" },
-        { "name": "dashboard", "label": "dashboard", "path": "qq-dashboard" },
-        { "name": "image-finder", "label": "image finder", "path": "image-finder" }
+        {
+          "name": "media-box",
+          "label": "media box",
+          "path": "media-box"
+        }
       ]
     },
     {
       "name": "qq-pi",
       "label": "qq pi",
       "folders": [
-        { "name": "qq-pi", "label": "qq pi", "path": "qq-pi" }
+        {
+          "name": "qq-pi",
+          "label": "qq pi",
+          "path": "qq-pi"
+        }
       ]
     },
     {
       "name": "ytgrab",
       "label": "ytgrab",
       "folders": [
-        { "name": "ytgrab", "label": "ytgrab", "path": "ytgrab" }
+        {
+          "name": "ytgrab",
+          "label": "ytgrab",
+          "path": "ytgrab"
+        }
       ]
     }
   ]
