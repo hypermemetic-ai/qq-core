@@ -14,7 +14,6 @@
     "./session-scope": "./src/session-scope.mjs",
     "./alias": "./src/alias.mjs",
     "./ask": "./src/ask.mjs",
-    "./skill-tool": "./src/skill-tool.mjs",
     "./session-history": "./src/session-history.mjs"
   },
   "files": [
@@ -27,6 +26,6 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/repository-geometry.mjs && node tests/projects-chair.mjs && tests/host-boot.sh"
+    "test": "node tests/repository-geometry.mjs && node tests/agent-surface.mjs && node tests/projects-chair.mjs && tests/host-boot.sh"
   }
 }

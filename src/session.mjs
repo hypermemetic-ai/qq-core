@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createAgentSurface } from "./agent-surface.mjs";
 import { makeAgentRow, orderAgents } from "./agent-catalog.mjs";
 import { createAliasBook, defaultAliasFile, defaultLegacyAliasFile } from "./alias.mjs";
 import { applyConversationEvent, deriveToolEventViews, projectConversation } from "./conversation.mjs";
@@ -135,8 +136,15 @@ function selectionSetup(selection) {
   };
 }
 
-function homeSetup(selection) {
-  return selectionSetup(selection);
+function composeSetup(surface, setup) {
+  return (agentCtx) => {
+    surface?.setup(agentCtx);
+    return setup?.(agentCtx);
+  };
+}
+
+function homeSetup(selection, surface) {
+  return composeSetup(surface, selectionSetup(selection));
 }
 
 function httpError(status, message, code) {
@@ -721,6 +729,7 @@ export function createQqService(ctx, config) {
   if (!agents || !sessions || !persistence) {
     throw new Error("qq: required DSH services are unavailable");
   }
+  const surface = createAgentSurface(ctx);
 
   const agentPromises = new Map();
   const handles = new Map();
@@ -822,14 +831,16 @@ export function createQqService(ctx, config) {
     return canonicalCwd(cwd);
   }
 
-  wrapDelegateAgentCreate(agents, (options) => {
-    const meta = options?.meta;
+  wrapDelegateAgentCreate(agents, (options = {}) => {
+    const meta = options.meta;
     const child = meta?.origin === CHILD_ORIGIN
       || (meta?.parentSession !== undefined && meta?.parentSession !== null);
-    if (!child || !samePath(meta?.cwd, projectsRoot)) return options;
+    const transformed = child && samePath(meta?.cwd, projectsRoot)
+      ? { ...options, meta: { ...meta, cwd: gitRootForDelegate(projectsRoot) } }
+      : options;
     return {
-      ...options,
-      meta: { ...meta, cwd: gitRootForDelegate(projectsRoot) },
+      ...transformed,
+      setup: composeSetup(surface, transformed.setup),
     };
   });
 
@@ -1241,11 +1252,7 @@ export function createQqService(ctx, config) {
 
   async function resumeChair(sessionId, header) {
     const cwd = header?.cwd;
-    const isProjects = samePath(cwd, projectsRoot);
-    const project = projectForCwd(cwd);
-    const setup = isProjects || project
-      ? selectionSetup({ current: selectedModel })
-      : homeSetup({ current: selectedModel });
+    const setup = homeSetup({ current: selectedModel }, surface);
     const handle = rememberHandle(await agents.resume({
       resumeSessionId: sessionId,
       agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
@@ -1312,7 +1319,7 @@ export function createQqService(ctx, config) {
       } else {
         const headers = await persistedHeaders();
         const persisted = headers.find((header) => header.id === defaultSessionId);
-        const setup = selectionSetup({ current: selectedModel });
+        const setup = homeSetup({ current: selectedModel }, surface);
         const options = {
           agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
           setup,
@@ -1636,7 +1643,7 @@ export function createQqService(ctx, config) {
       : project.cwd;
     await ctx.get("loader")?.await();
     const sessionId = `session-${randomUUID()}`;
-    const setup = selectionSetup({ current: selectedModel });
+    const setup = homeSetup({ current: selectedModel }, surface);
     const handle = rememberHandle(await agents.create({
       sessionId,
       meta: { cwd },
@@ -1673,7 +1680,7 @@ export function createQqService(ctx, config) {
     try {
       cwd = scratch.create(sessionId);
       scratch.verify(sessionId);
-      const setup = selectionSetup({ current: selectedModel });
+      const setup = homeSetup({ current: selectedModel }, surface);
       handle = rememberHandle(await agents.create({
         sessionId,
         meta: { cwd },
@@ -1734,7 +1741,7 @@ export function createQqService(ctx, config) {
         sessionId,
         meta: { cwd: projectsRoot },
         agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
-        setup: selectionSetup({ current: selectedModel }),
+        setup: homeSetup({ current: selectedModel }, surface),
       }));
       await sessions.flush(handle.agent.session);
     } catch (error) {
@@ -2156,6 +2163,7 @@ export function createQqService(ctx, config) {
     },
     alias: liveAlias,
     resolve: resolveAlias,
+    surface,
     async create(projectName, folderName) {
       const project = projectByName(projectName ?? defaultProject);
       let folderCwd;

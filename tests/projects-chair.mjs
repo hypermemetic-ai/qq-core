@@ -73,28 +73,42 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
 
   function makeAgent(id, metaOrCwd, setup) {
     const meta = typeof metaOrCwd === "string" ? { cwd: metaOrCwd } : metaOrCwd;
-    const restricted = [];
+    const restrictions = [];
     const guards = [];
     const listeners = [];
-    const registered = new Map([["bash", { name: "bash", async execute() {} }]]);
+    const inherited = new Map([["bash", { name: "bash", async execute() {} }]]);
+    const local = new Map();
     const tools = {
-      restrict(rule) {
-        restricted.push(...(rule?.deny ?? []));
-        return () => {};
+      restrict(filter) {
+        const effect = { filter, active: true };
+        restrictions.push(effect);
+        return () => { effect.active = false; };
       },
       guard(fn) {
         guards.push(fn);
-        return () => {};
+        return () => guards.splice(guards.indexOf(fn), 1);
       },
       register(definition) {
-        const previous = registered.get(definition.name);
-        registered.set(definition.name, definition);
+        const previous = local.get(definition.name);
+        local.set(definition.name, definition);
         return () => {
-          if (previous) registered.set(definition.name, previous);
-          else registered.delete(definition.name);
+          if (previous) local.set(definition.name, previous);
+          else local.delete(definition.name);
         };
       },
-      get(name) { return registered.get(name); },
+      get(name, scope) {
+        if (scope && local.has(name)) return local.get(name);
+        let definition = inherited.get(name);
+        if (scope) {
+          for (const { filter, active } of restrictions) {
+            if (!active) continue;
+            if (filter.allow && !filter.allow.includes(name)) definition = undefined;
+            if (filter.deny?.includes(name)) definition = undefined;
+          }
+        }
+        return definition;
+      },
+      schemas() { return [...inherited.values()]; },
     };
     const systemPrompt = {
       section() { return () => {}; },
@@ -118,7 +132,7 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
       },
     };
     setup?.(agentCtx);
-    if (setup) setupRecords.push({ id, restricted, guards });
+    const setupRecord = setup ? { id, restrictions, guards, agent: undefined } : undefined;
     const agent = {
       status: "idle",
       ctx: agentCtx,
@@ -136,6 +150,10 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
       },
       async whenIdle() {},
     };
+    if (setupRecord) {
+      setupRecord.agent = agent;
+      setupRecords.push(setupRecord);
+    }
     return agent;
   }
 
@@ -248,31 +266,48 @@ function projectsAliasHolder(fixture) {
   return payload.entries.find((entry) => entry.alias === "projects" && entry.goneAt === null)?.session;
 }
 
-function assertUnfenced(fixture, id) {
+function activeFilters(setup) {
+  return setup.restrictions.filter(({ active }) => active).map(({ filter }) => filter);
+}
+
+function guardReason(setup, name) {
+  for (const guard of setup.guards) {
+    const reason = guard({ name, agent: setup.agent });
+    if (reason !== undefined) return reason;
+  }
+  return undefined;
+}
+
+function assertDefaultSurface(fixture, id) {
   const setup = fixture.setupRecords.find((record) => record.id === id);
   assert.ok(setup, `missing setup record for ${id}`);
-  assert.deepEqual(setup.restricted, []);
-  assert.deepEqual(setup.guards, []);
+  assert.deepEqual(activeFilters(setup), [{ allow: [] }]);
+  assert.equal(setup.guards.length, 1);
+  assert.match(guardReason(setup, "bash"), /does not allow that inherited tool/);
 }
 
 function assertNotProjectsFenced(fixture, id) {
   const setup = fixture.setupRecords.find((record) => record.id === id);
   assert.ok(setup, `missing setup record for ${id}`);
-  for (const name of ["bash", "write", "edit"]) {
-    assert.equal(setup.restricted.includes(name), false, `${name} inherited the projects-chair fence`);
-  }
   assert.equal(
-    setup.guards.some((guard) => ["bash", "write", "edit"].some((name) => guard({ name }) !== undefined)),
-    false,
-    "implementer inherited the projects-chair filesystem guard",
+    activeFilters(setup).some((filter) => Array.isArray(filter.allow) && filter.allow.length === 0),
+    true,
+    "delegated agent is missing qq-core's empty default allow-list",
   );
+  for (const guard of setup.guards) {
+    for (const name of ["bash", "write", "edit"]) {
+      assert.doesNotMatch(guard({ name, agent: setup.agent }) ?? "", /does not write the filesystem/);
+    }
+  }
 }
 
-function assertProjectsUnfenced(fixture, id) {
+function assertProjectsDefaultSurface(fixture, id) {
+  assertDefaultSurface(fixture, id);
   const setup = fixture.setupRecords.find((record) => record.id === id);
-  assert.ok(setup, `missing setup record for ${id}`);
-  assert.deepEqual(setup.restricted, [], "Projects chair tools must remain visible");
-  assert.deepEqual(setup.guards, [], "Projects chair tools must remain executable");
+  for (const name of ["bash", "write", "edit"]) {
+    assert.match(guardReason(setup, name), /does not allow that inherited tool/);
+    assert.doesNotMatch(guardReason(setup, name), /does not write the filesystem/);
+  }
 }
 
 async function replacement(command, action) {
@@ -291,7 +326,7 @@ async function replacement(command, action) {
     assert.deepEqual(projectsAgents(fixture).map((agent) => agent.session.id), [result.id]);
     assert.deepEqual(persistedProjectsRows(fixture).map((row) => row.id), [result.id]);
     assert.equal(projectsAliasHolder(fixture), result.id);
-    assertProjectsUnfenced(fixture, result.id);
+    assertProjectsDefaultSurface(fixture, result.id);
     return result.id;
   } finally {
     fixture.cleanup();
@@ -339,10 +374,10 @@ async function replacement(command, action) {
     })).agent;
     assert.equal(projectChild.session.header.cwd, gitRoot);
 
-    assertProjectsUnfenced(fixture, projects.id);
-    assertUnfenced(fixture, ORIGIN_CHILD_ID);
-    assertUnfenced(fixture, PARENT_CHILD_ID);
-    assertUnfenced(fixture, PROJECT_CHILD_ID);
+    assertProjectsDefaultSurface(fixture, projects.id);
+    assertNotProjectsFenced(fixture, ORIGIN_CHILD_ID);
+    assertNotProjectsFenced(fixture, PARENT_CHILD_ID);
+    assertNotProjectsFenced(fixture, PROJECT_CHILD_ID);
   } finally {
     fixture.cleanup();
   }
@@ -407,7 +442,7 @@ async function replacement(command, action) {
     assert.equal(adoption?.owned, true);
     assert.deepEqual(land.ownedChildren(), [delegated.child]);
     assert.equal(realpathSync(land.bySession(delegated.child).worktree), childCwd);
-    assertProjectsUnfenced(fixture, projects.id);
+    assertProjectsDefaultSurface(fixture, projects.id);
     assertNotProjectsFenced(fixture, delegated.child);
   } finally {
     await adoption?.rollback?.("projects-chair test cleanup");
@@ -420,6 +455,22 @@ async function replacement(command, action) {
 const clearId = await replacement("/clear", "replace");
 const newId = await replacement("/new", "create");
 assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session id");
+
+{
+  const fixture = makeFixture({ liveProjects: false });
+  try {
+    const project = await fixture.service.create();
+    const home = await fixture.service.createHome();
+    assertDefaultSurface(fixture, project.id);
+    assertDefaultSurface(fixture, home.id);
+    assert.equal(typeof fixture.service.surface.allow, "function");
+    fixture.service.surface.allow(fixture.agents.get(project.id), ["bash"]);
+    const projectSetup = fixture.setupRecords.find((record) => record.id === project.id);
+    assert.deepEqual(activeFilters(projectSetup), [{ allow: ["bash"] }]);
+  } finally {
+    fixture.cleanup();
+  }
+}
 
 {
   const fixture = makeFixture();
@@ -448,7 +499,7 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
     assert.deepEqual(projectsAgents(fixture).map((agent) => agent.session.id), [created.id]);
     assert.deepEqual(persistedProjectsRows(fixture).map((row) => row.id), [created.id]);
     assert.equal(projectsAliasHolder(fixture), created.id);
-    assertProjectsUnfenced(fixture, created.id);
+    assertProjectsDefaultSurface(fixture, created.id);
   } finally {
     fixture.cleanup();
   }
@@ -462,7 +513,7 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
     assert.equal(fixture.createCalls, 0);
     assert.equal(fixture.resumeCalls, 1);
     assert.equal(projectsAliasHolder(fixture), STALE_PROJECTS_ID);
-    assertProjectsUnfenced(fixture, STALE_PROJECTS_ID);
+    assertProjectsDefaultSurface(fixture, STALE_PROJECTS_ID);
   } finally {
     fixture.cleanup();
   }
