@@ -27,6 +27,6 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/repository-geometry.mjs && tests/host-boot.sh"
+    "test": "node tests/repository-geometry.mjs && node tests/projects-chair.mjs && tests/host-boot.sh"
   }
 }
