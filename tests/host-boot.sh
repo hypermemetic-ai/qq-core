@@ -54,8 +54,8 @@ const { readFileSync } = require("node:fs");
 const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const core = process.argv[3];
 const deps = manifest.dependencies ?? {};
-if (!["link:", "file:"].some((prefix) => deps["@hypermemetic-ai/qq"] === `${prefix}${core}`)) {
-  throw new Error(`core profile link is wrong: ${deps["@hypermemetic-ai/qq"]}`);
+if (!["link:", "file:"].some((prefix) => deps["@hypermemetic-ai/qq-core"] === `${prefix}${core}`)) {
+  throw new Error(`core profile link is wrong: ${deps["@hypermemetic-ai/qq-core"]}`);
 }
 for (const name of ["qq-ui", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
   if (deps[`@hypermemetic-ai/${name}`] !== undefined) throw new Error(`core-only boot linked ${name}`);
@@ -81,12 +81,16 @@ grep -Fq '<!doctype html>' "$scratch/page" 2>/dev/null || {
   echo "all-parts HTTP console did not become ready" >&2
   exit 1
 }
-node - "$scratch/all-parts-state/profiles/qq/package.json" "$parts" <<'NODE'
+node - "$scratch/all-parts-state/profiles/qq/package.json" "$parts" "$sim" <<'NODE'
 const { readFileSync, realpathSync } = require("node:fs");
 const { join } = require("node:path");
 const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const parts = process.argv[3];
 const deps = manifest.dependencies ?? {};
+const core = process.argv[4];
+if (!["link:", "file:"].some((prefix) => deps["@hypermemetic-ai/qq-core"] === `${prefix}${core}`)) {
+  throw new Error(`core profile link is wrong: ${deps["@hypermemetic-ai/qq-core"]}`);
+}
 for (const name of ["qq-ui", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
   const path = realpathSync(join(parts, name));
   const value = deps[`@hypermemetic-ai/${name}`];

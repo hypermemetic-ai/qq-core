@@ -110,13 +110,13 @@ if ! node - "$profile_manifest" "$root" ${linked_roots[@]+"${linked_roots[@]}"} 
 const { existsSync, readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const [manifestPath, corePath, ...siblingPaths] = process.argv.slice(2);
-const packages = [["@hypermemetic-ai/qq", corePath]];
+const packages = [["@hypermemetic-ai/qq-core", corePath]];
 for (const siblingPath of siblingPaths) {
   const pkg = JSON.parse(readFileSync(join(siblingPath, "package.json"), "utf8"));
   packages.push([pkg.name, siblingPath]);
 }
 const managed = new Set([
-  "@hypermemetic-ai/qq", "@hypermemetic-ai/qq-ui", "@hypermemetic-ai/qq-workflows",
+  "@hypermemetic-ai/qq-core", "@hypermemetic-ai/qq-ui", "@hypermemetic-ai/qq-workflows",
   "@hypermemetic-ai/qq-models", "@hypermemetic-ai/qq-relay",
   "@hypermemetic-ai/qq-dictation", "@hypermemetic-ai/image-finder",
   "@hypermemetic-ai/media-box",

@@ -2,15 +2,15 @@ import { createQqService } from "./session.mjs";
 import { attachSessionHistory } from "./session-history.mjs";
 import { attachSkillToolVisibility } from "./skill-tool.mjs";
 
-export const name = "qq";
+export const name = "qq-core";
 export const inject = ["agents", "sessions", "sessionPersistence"];
-export const provide = "qq";
+export const provide = "qq-core";
 
 /** Provide the presentation-neutral DSH session service and its alias book. */
 export function apply(ctx, config) {
   const service = createQqService(ctx, config ?? {});
-  ctx.provide("qq", service);
-  ctx.provide("qq-aliases", Object.freeze({
+  ctx.provide("qq-core", service);
+  ctx.provide("qq-core-aliases", Object.freeze({
     alias: service.alias,
     resolve: service.resolve,
   }));

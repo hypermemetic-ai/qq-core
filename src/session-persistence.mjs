@@ -23,4 +23,4 @@ export function guardSessionPersistence(persistence) {
   return persistence;
 }
 
-const GUARDED = Symbol.for("@hypermemetic-ai/qq/session-persistence-guard");
+const GUARDED = Symbol.for("@hypermemetic-ai/qq-core/session-persistence-guard");

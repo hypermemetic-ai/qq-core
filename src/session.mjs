@@ -27,9 +27,9 @@ const PROJECTS_WRITE_REASON =
 // AgentHandles are DSH-owned capabilities. Keep the capability on the live
 // Agent so a qq fiber replacement can rebuild its index without owning or
 // disposing the Agent itself.
-export const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq/agent-handle");
+export const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq-core/agent-handle");
 const CORDIS_ORIGINAL = Symbol.for("cordis.original");
-const DELEGATE_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq/delegate-create-guard");
+const DELEGATE_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/delegate-create-guard");
 
 export function adoptAgentHandle(handle) {
   const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
