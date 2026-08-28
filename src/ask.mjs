@@ -11,7 +11,7 @@ function userMessage(content) {
     id: randomUUID(),
     role: "user",
     content: blocks,
-    source: { kind: "plugin", plugin: "qq", form: "notice" },
+    source: { kind: "plugin", plugin: "qq-core", form: "notice" },
   };
 }
 

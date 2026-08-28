@@ -1,4 +1,4 @@
-# `@hypermemetic-ai/qq`
+# `@hypermemetic-ai/qq-core`
 
 Presentation-neutral Cordis service over DSH Agents and sessions. This package
 owns list, read, create, prompt/steer admission, pending-inbox mutation,

@@ -881,7 +881,7 @@ function skillDefinition() {
     description: "Find and verify a prior DSH session from clues about its user/assistant conversation or time.",
     content: FIND_SESSION_INSTRUCTIONS,
     source: "runtime",
-    provider: "qq",
+    provider: "qq-core",
     invocation: { modelInvocable: false, userInvocable: true },
   };
 }
