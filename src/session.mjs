@@ -144,7 +144,11 @@ function fenceProjectsTools(agentCtx) {
 }
 
 function projectsSetup(selection) {
-  return selectionSetup(selection);
+  const select = selectionSetup(selection);
+  return (agentCtx) => {
+    fenceProjectsTools(agentCtx);
+    return select(agentCtx);
+  };
 }
 
 function homeSetup(selection) {
@@ -1719,6 +1723,48 @@ export function createQqService(ctx, config) {
     fencedProjects.add(agent);
   }
 
+  function projectsRow(agent) {
+    const id = agent.session.id;
+    const alias = book.aliasFor(id);
+    return {
+      id,
+      scope: "projects",
+      context: "projects",
+      cwd: projectsRoot,
+      ...(alias ? { alias } : {}),
+    };
+  }
+
+  async function mintProjects() {
+    await ctx.get("loader")?.await();
+    const sessionId = `session-${randomUUID()}`;
+    let handle;
+    try {
+      handle = rememberHandle(await agents.create({
+        sessionId,
+        meta: { cwd: projectsRoot },
+        agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
+        setup: projectsSetup({ current: selectedModel }),
+      }));
+      await sessions.flush(handle.agent.session);
+    } catch (error) {
+      const createdId = handle?.agent?.session?.id ?? sessionId;
+      if (agents.get(createdId)) {
+        try { await disposeLive(createdId); } catch {}
+      }
+      throw error;
+    }
+    const agent = handle.agent;
+    fencedProjects.add(agent);
+    syncLive(agent.session.id);
+    // During replacement both Projects Agents are briefly live. Explicitly
+    // transfer the unique reserved alias to the freshly minted chair rather
+    // than relying on registry iteration order.
+    book.pin(agent.session.id, PROJECTS_ALIAS);
+    persistLiveChairs();
+    return projectsRow(agent);
+  }
+
   async function createProjects() {
     await boot;
     await ctx.get("loader")?.await();
@@ -1726,43 +1772,14 @@ export function createQqService(ctx, config) {
     if (live) {
       fenceProjectsAgent(live);
       syncLive(live.session.id);
+      book.pin(live.session.id, PROJECTS_ALIAS);
       persistLiveChairs();
-      const alias = book.aliasFor(live.session.id);
-      return {
-        id: live.session.id,
-        scope: "projects",
-        context: "projects",
-        cwd: projectsRoot,
-        ...(alias ? { alias } : {}),
-      };
+      return projectsRow(live);
     }
-    const headers = await persistedHeaders();
-    const persisted = headers.find((header) => samePath(header.cwd, projectsRoot));
-    const setup = projectsSetup({ current: selectedModel });
-    const options = {
-      agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
-      setup,
-    };
-    const handle = rememberHandle(persisted
-      ? await agents.resume({ resumeSessionId: persisted.id, ...options })
-      : await agents.create({
-          sessionId: `session-${randomUUID()}`,
-          meta: { cwd: projectsRoot },
-          ...options,
-        }));
-    if (!persisted) await sessions.flush(handle.agent.session);
-    const createdId = handle.agent.session.id;
-    fencedProjects.add(handle.agent);
-    syncLive(createdId);
-    persistLiveChairs();
-    const alias = book.aliasFor(createdId);
-    return {
-      id: createdId,
-      scope: "projects",
-      context: "projects",
-      cwd: projectsRoot,
-      ...(alias ? { alias } : {}),
-    };
+    // Host restart restoration is driven by live-chairs. An absent reserved
+    // chair always starts a fresh conversation; /resume is the explicit way
+    // to reopen a historical Projects session.
+    return mintProjects();
   }
 
   function liveDescendants(sessionId) {
@@ -1959,18 +1976,45 @@ export function createQqService(ctx, config) {
     };
   }
 
+  async function replaceProjects(sessionId) {
+    let created;
+    try {
+      created = await mintProjects();
+    } catch (error) {
+      // Agent creation can fail after DSH has emitted lifecycle events. Make
+      // the old chair's reserved identity explicit before surfacing failure.
+      if (agents.get(sessionId)) {
+        syncLive(sessionId);
+        book.pin(sessionId, PROJECTS_ALIAS);
+        persistLiveChairs();
+      }
+      throw error;
+    }
+    try {
+      await disposeDescendants(sessionId);
+      await disposeLive(sessionId);
+    } catch (error) {
+      // Keep replacement transactional if closing the old chair fails: remove
+      // the new chair and return the reserved alias to the still-live old one.
+      try { await disposeLive(created.id); } catch {}
+      const old = agents.get(sessionId);
+      if (old) {
+        syncLive(sessionId);
+        book.pin(sessionId, PROJECTS_ALIAS);
+        persistLiveChairs();
+      }
+      throw error;
+    }
+    return { ...created, closed: sessionId };
+  }
+
   async function replace(sessionId) {
     await boot;
     const agent = await liveAgent(sessionId);
     if (agent.status === "running") throw httpError(409, RUNNING_CLEAR);
     const classified = classifyAgent(agent);
     if (classified?.scope === "home") return replaceHome(sessionId);
-    if (classified?.scope === "projects") {
-      await disposeDescendants(sessionId);
-      await disposeLive(sessionId);
-      const created = await createProjects();
-      return { ...created, closed: sessionId };
-    }
+    if (classified?.scope === "projects") return replaceProjects(sessionId);
     if (!classified?.project) throw httpError(404, "qq: project not found");
     return replaceProject(sessionId, classified.project);
   }
@@ -2152,7 +2196,7 @@ export function createQqService(ctx, config) {
           const created = classified?.scope === "home"
             ? await createHome()
             : classified?.scope === "projects"
-              ? await createProjects()
+              ? await replace(sessionId)
               : await createAt(classified?.project?.name, classified?.cwd);
           return { kind: "navigate", action: "create", ...created };
         }
