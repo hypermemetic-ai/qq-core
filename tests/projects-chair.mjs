@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,12 +9,16 @@ import { createQqService } from "../src/session.mjs";
 const BOOT_ID = "session-10000000-0000-4000-8000-000000000001";
 const OLD_PROJECTS_ID = "session-20000000-0000-4000-8000-000000000002";
 const STALE_PROJECTS_ID = "session-30000000-0000-4000-8000-000000000003";
+const ORIGIN_CHILD_ID = "session-40000000-0000-4000-8000-000000000004";
+const PARENT_CHILD_ID = "session-50000000-0000-4000-8000-000000000005";
+const PROJECT_CHILD_ID = "session-60000000-0000-4000-8000-000000000006";
 
 function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "qq-core-projects-chair-"));
   const projectsRoot = join(root, "projects");
   const bootCwd = join(projectsRoot, "qq-core");
   mkdirSync(bootCwd, { recursive: true });
+  execFileSync("git", ["init", "--quiet", bootCwd]);
 
   const headers = new Map();
   const store = new Map();
@@ -160,6 +165,13 @@ function projectsAliasHolder(fixture) {
   return payload.entries.find((entry) => entry.alias === "projects" && entry.goneAt === null)?.session;
 }
 
+function assertUnfenced(fixture, id) {
+  const setup = fixture.setupRecords.find((record) => record.id === id);
+  assert.ok(setup, `missing setup record for ${id}`);
+  assert.deepEqual(setup.restricted, []);
+  assert.deepEqual(setup.guards, []);
+}
+
 function assertProjectsFence(fixture, id) {
   const setup = fixture.setupRecords.find((record) => record.id === id);
   assert.ok(setup, `missing setup record for ${id}`);
@@ -189,6 +201,56 @@ async function replacement(command, action) {
     assert.equal(projectsAliasHolder(fixture), result.id);
     assertProjectsFence(fixture, result.id);
     return result.id;
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+{
+  const fixture = makeFixture({ liveProjects: false });
+  try {
+    const gitRoot = fixture.service.gitRootForDelegate(fixture.service.projectsRoot);
+    assert.equal(fixture.service.gitRootForDelegate(join(fixture.root, ".")), fixture.root);
+    assert.equal(
+      gitRoot,
+      fixture.service.listProjects().find((project) => project.name === fixture.service.defaultProject).cwd,
+    );
+
+    const projects = await fixture.service.createProjects();
+    assert.equal(fixture.agents.get(projects.id).session.header.cwd, fixture.service.projectsRoot);
+
+    const originChild = (await fixture.agents.create({
+      sessionId: ORIGIN_CHILD_ID,
+      meta: { cwd: fixture.service.projectsRoot, origin: "subagent" },
+      setup() {},
+    })).agent;
+    assert.equal(originChild.session.header.cwd, gitRoot);
+    assert.notEqual(originChild.session.header.cwd, fixture.service.projectsRoot);
+    assert.equal(
+      execFileSync("git", ["-C", originChild.session.header.cwd, "rev-parse", "--is-inside-work-tree"], {
+        encoding: "utf8",
+      }).trim(),
+      "true",
+    );
+
+    const parentChild = (await fixture.agents.create({
+      sessionId: PARENT_CHILD_ID,
+      meta: { cwd: fixture.service.projectsRoot, parentSession: projects.id },
+      setup() {},
+    })).agent;
+    assert.equal(parentChild.session.header.cwd, gitRoot);
+
+    const projectChild = (await fixture.agents.create({
+      sessionId: PROJECT_CHILD_ID,
+      meta: { cwd: gitRoot, origin: "subagent", parentSession: projects.id },
+      setup() {},
+    })).agent;
+    assert.equal(projectChild.session.header.cwd, gitRoot);
+
+    assertProjectsFence(fixture, projects.id);
+    assertUnfenced(fixture, ORIGIN_CHILD_ID);
+    assertUnfenced(fixture, PARENT_CHILD_ID);
+    assertUnfenced(fixture, PROJECT_CHILD_ID);
   } finally {
     fixture.cleanup();
   }
