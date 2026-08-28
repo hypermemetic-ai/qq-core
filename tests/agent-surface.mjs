@@ -15,6 +15,7 @@ const inherited = new Map([
 function makeHarness({ skills = [] } = {}) {
   const rootListeners = new Map();
   const agents = [];
+  const effects = [];
   const skillService = {
     async snapshot() { return { complete: true, skills }; },
   };
@@ -33,6 +34,7 @@ function makeHarness({ skills = [] } = {}) {
     effect(factory) {
       const release = factory();
       assert.equal(typeof release, "function", "Cordis effect factory must return a disposer");
+      effects.push(release);
       return release;
     },
   };
@@ -133,7 +135,13 @@ function makeHarness({ skills = [] } = {}) {
     };
   }
 
-  return { root, agents, makeAgent, rootListeners };
+  function dispose() {
+    for (const release of effects.splice(0).reverse()) {
+      try { release(); } catch {}
+    }
+  }
+
+  return { root, agents, makeAgent, rootListeners, dispose };
 }
 
 const prompt = { source: { kind: "user" }, content: [{ type: "text", text: "hello" }] };
@@ -314,6 +322,65 @@ const pluginInstructions = { source: { kind: "plugin", plugin: "agent-instructio
   } finally {
     inherited.delete("future_tool");
   }
+}
+
+{
+  const harness = makeHarness();
+  const fixture = harness.makeAgent({ projects: true });
+  const surface1 = createAgentSurface(harness.root);
+  surface1.fenceProjects(fixture.agent);
+  harness.dispose();
+  const surface2 = createAgentSurface(harness.root);
+  const effective = surface2.allow(fixture.agent, ["bash", "write", "edit"]);
+  assert.deepEqual(effective, [], "reloaded surface must rehome the Projects fence");
+  assert.deepEqual(
+    fixture.restrictions.filter(({ active }) => active).map(({ filter }) => filter),
+    [{ allow: [] }],
+  );
+  for (const name of ["bash", "write", "edit"]) {
+    assert.equal(fixture.guards[0]({ name, agent: fixture.agent }), internals.PROJECTS_WRITE_REASON);
+  }
+}
+
+{
+  const harness = makeHarness();
+  const fixture = harness.makeAgent({ projects: true });
+  const surface1 = createAgentSurface(harness.root, {
+    isProjects: (agent) => agent === fixture.agent,
+  });
+  surface1.apply(fixture.agent);
+  harness.dispose();
+  const surface2 = createAgentSurface(harness.root, {
+    isProjects: (agent) => agent === fixture.agent,
+  });
+  surface2.allow(fixture.agent, ["bash", "write", "edit"]);
+  assert.deepEqual(
+    fixture.restrictions.filter(({ active }) => active).map(({ filter }) => filter),
+    [{ allow: [] }],
+  );
+  for (const name of ["bash", "write", "edit"]) {
+    assert.equal(fixture.guards[0]({ name, agent: fixture.agent }), internals.PROJECTS_WRITE_REASON);
+  }
+}
+
+{
+  const harness = makeHarness();
+  const surface1 = createAgentSurface(harness.root);
+  harness.dispose();
+  const surface2 = createAgentSurface(harness.root);
+  const fixture = harness.makeAgent();
+  surface1.setup(fixture.agentCtx);
+  surface1.apply(fixture.agent);
+  assert.equal(fixture.restrictions.length, 0, "disposed surface must not install a stale empty mask");
+  surface2.setup(fixture.agentCtx);
+  surface2.apply(fixture.agent);
+  surface2.allow(fixture.agent, ["bash"]);
+  assert.deepEqual(
+    fixture.restrictions.filter(({ active }) => active).map(({ filter }) => filter),
+    [{ allow: ["bash"] }],
+    "surface.allow must replace the current incarnation's empty mask after reload",
+  );
+  assert.equal(fixture.guards[0]({ name: "bash", agent: fixture.agent }), undefined);
 }
 
 {

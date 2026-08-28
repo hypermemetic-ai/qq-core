@@ -212,9 +212,15 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     ["sessionPersistence", persistence],
     ["loader", { async await() {} }],
   ]);
+  const effects = [];
   const ctx = {
     get(name) { return services.get(name); },
     logger: { warn() {} },
+    effect(factory) {
+      const release = factory();
+      if (typeof release === "function") effects.push(release);
+      return release;
+    },
   };
   const files = {
     alias: join(root, "state", "aliases.json"),
@@ -222,7 +228,7 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     scopes: join(root, "state", "scopes.json"),
     scratch: join(root, "scratch"),
   };
-  const service = createQqService(ctx, {
+  const config = {
     sessionId: BOOT_ID,
     cwd: bootCwd,
     projectsRoot,
@@ -234,17 +240,28 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     scopeFile: files.scopes,
     rng: () => 0,
     now: () => 1,
-  });
+  };
+  let service = createQqService(ctx, config);
   services.set("qq", service);
+
+  function reload() {
+    for (const release of effects.splice(0).reverse()) {
+      try { release(); } catch {}
+    }
+    service = createQqService(ctx, config);
+    services.set("qq", service);
+    return service;
+  }
 
   return {
     root,
-    service,
+    get service() { return service; },
     agents,
     ctx,
     setService(name, value) { services.set(name, value); },
     files,
     setupRecords,
+    reload,
     get createCalls() { return createCalls; },
     get resumeCalls() { return resumeCalls; },
     failNextCreate(error = new Error("fake: create failed")) { createFailure = error; },
@@ -553,6 +570,36 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
     assert.deepEqual(projectsAgents(fixture).map((agent) => agent.session.id), [OLD_PROJECTS_ID]);
     assert.deepEqual(persistedProjectsRows(fixture).map((row) => row.id), [OLD_PROJECTS_ID]);
     assert.equal(projectsAliasHolder(fixture), OLD_PROJECTS_ID);
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+{
+  const fixture = makeFixture({ liveProjects: false });
+  try {
+    const projects = await fixture.service.createProjects();
+    const createBeforeReload = fixture.agents.create;
+    fixture.reload();
+    assert.equal(
+      fixture.agents.create,
+      createBeforeReload,
+      "HMR must reuse the delegate create wrapper instead of stacking setup()",
+    );
+
+    const reloaded = await fixture.service.createProjects();
+    assert.equal(reloaded.id, projects.id);
+    fixture.service.surface.allow(fixture.agents.get(projects.id), ["bash", "write", "edit"]);
+    assertProjectsFence(fixture, projects.id);
+
+    const home = await fixture.service.createHome();
+    fixture.service.surface.allow(fixture.agents.get(home.id), ["bash"]);
+    const homeSetup = fixture.setupRecords.find((record) => record.id === home.id);
+    assert.deepEqual(
+      activeFilters(homeSetup),
+      [{ allow: ["bash"] }],
+      "surface.allow must unhide tools on agents created after qq-core HMR",
+    );
   } finally {
     fixture.cleanup();
   }

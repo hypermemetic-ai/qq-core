@@ -28,6 +28,7 @@ const PROJECTS_ALIAS = "projects";
 export const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq-core/agent-handle");
 const CORDIS_ORIGINAL = Symbol.for("cordis.original");
 const DELEGATE_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/delegate-create-guard");
+const AGENT_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/agent-create-guard");
 
 export function adoptAgentHandle(handle) {
   const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
@@ -53,7 +54,11 @@ function wrapDelegateAgentCreate(value, transform) {
   const agents = unwrapAgents(value);
   if (!agents || typeof agents.create !== "function") return;
   const installed = agents[DELEGATE_CREATE_GUARD];
-  if (installed?.wrapped === agents.create) {
+  // Reuse whenever the guard exists. wrapAgentCreate overwrites agents.create
+  // with rememberHandle, so `wrapped === create` fails on the next plugin apply
+  // even while this transform is still in the chain. Stacking would compose
+  // another setup() and leave a stale restrict() mask on later agents.
+  if (installed) {
     installed.transform = transform;
     return;
   }
@@ -66,6 +71,28 @@ function wrapDelegateAgentCreate(value, transform) {
   agents.create = wrapped;
   Object.defineProperty(agents, DELEGATE_CREATE_GUARD, {
     value: Object.assign(state, { wrapped }),
+    configurable: true,
+  });
+}
+
+function wrapAgentCreate(target, remember) {
+  if (!target) return;
+  const installed = target[AGENT_CREATE_GUARD];
+  if (installed) {
+    installed.remember = remember;
+    return;
+  }
+  const state = { remember };
+  if (typeof target.create === "function") {
+    const create = target.create.bind(target);
+    target.create = async (options) => state.remember(await create(options));
+  }
+  if (typeof target.resume === "function") {
+    const resume = target.resume.bind(target);
+    target.resume = async (options) => state.remember(await resume(options));
+  }
+  Object.defineProperty(target, AGENT_CREATE_GUARD, {
+    value: state,
     configurable: true,
   });
 }
@@ -733,7 +760,11 @@ export function createQqService(ctx, config) {
   if (!agents || !sessions || !persistence) {
     throw new Error("qq: required DSH services are unavailable");
   }
-  const surface = createAgentSurface(ctx);
+  const surface = createAgentSurface(ctx, {
+    isProjects(agent) {
+      return samePath(agentCwd(agent), projectsRoot);
+    },
+  });
 
   const agentPromises = new Map();
   const handles = new Map();
@@ -969,20 +1000,7 @@ export function createQqService(ctx, config) {
     return handle;
   }
 
-  const wrappedCreates = new WeakSet();
-  function wrapAgentCreate(target) {
-    if (!target || wrappedCreates.has(target)) return;
-    if (typeof target.create === "function") {
-      const create = target.create.bind(target);
-      target.create = async (options) => rememberHandle(await create(options));
-    }
-    if (typeof target.resume === "function") {
-      const resume = target.resume.bind(target);
-      target.resume = async (options) => rememberHandle(await resume(options));
-    }
-    wrappedCreates.add(target);
-  }
-  wrapAgentCreate(agents);
+  wrapAgentCreate(agents, rememberHandle);
 
   for (const agent of liveAgents()) {
     const handle = agent?.[AGENT_HANDLE];
