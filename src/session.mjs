@@ -29,6 +29,7 @@ const PROJECTS_WRITE_REASON =
 // disposing the Agent itself.
 export const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq/agent-handle");
 const CORDIS_ORIGINAL = Symbol.for("cordis.original");
+const DELEGATE_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq/delegate-create-guard");
 
 export function adoptAgentHandle(handle) {
   const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
@@ -48,6 +49,27 @@ export function adoptAgentHandle(handle) {
 function unwrapAgents(value) {
   const original = value?.[CORDIS_ORIGINAL];
   return original ?? value;
+}
+
+function wrapDelegateAgentCreate(value, transform) {
+  const agents = unwrapAgents(value);
+  if (!agents || typeof agents.create !== "function") return;
+  const installed = agents[DELEGATE_CREATE_GUARD];
+  if (installed?.wrapped === agents.create) {
+    installed.transform = transform;
+    return;
+  }
+
+  const original = agents.create;
+  const state = { transform };
+  const wrapped = function wrappedDelegateCreate(options, ...rest) {
+    return Reflect.apply(original, this, [state.transform(options), ...rest]);
+  };
+  agents.create = wrapped;
+  Object.defineProperty(agents, DELEGATE_CREATE_GUARD, {
+    value: Object.assign(state, { wrapped }),
+    configurable: true,
+  });
 }
 
 /**
@@ -833,6 +855,22 @@ export function createQqService(ctx, config) {
     const b = canonicalCwd(right);
     return Boolean(a && b && a === b);
   }
+
+  function gitRootForDelegate(cwd) {
+    if (samePath(cwd, projectsRoot)) return bootProject.cwd;
+    return canonicalCwd(cwd);
+  }
+
+  wrapDelegateAgentCreate(agents, (options) => {
+    const meta = options?.meta;
+    const child = meta?.origin === CHILD_ORIGIN
+      || (meta?.parentSession !== undefined && meta?.parentSession !== null);
+    if (!child || !samePath(meta?.cwd, projectsRoot)) return options;
+    return {
+      ...options,
+      meta: { ...meta, cwd: gitRootForDelegate(projectsRoot) },
+    };
+  });
 
   function homeWorkspace(sessionId) {
     if (!SESSION_ID.test(sessionId)) return undefined;
@@ -2121,6 +2159,7 @@ export function createQqService(ctx, config) {
     defaultProject,
     defaultFolder: bootProject.grouped ? bootProject.folder?.name : undefined,
     projectsRoot,
+    gitRootForDelegate,
     onDirectUserMessage(observer) {
       if (typeof observer !== "function") throw new TypeError("qq: direct-user observer must be a function");
       directUserMessageObservers.add(observer);
