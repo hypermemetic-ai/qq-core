@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Deterministic localhost OpenAI-compatible stub for isolated DSH qq host
 // proofs. It supplies no model semantics; explicit proof prompts drive the
-// pinned DSH base bundle's native coding tools and skill-tool visibility.
+// pinned DSH base bundle's native coding tools and skill visibility.
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 

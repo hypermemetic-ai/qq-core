@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createAgentSurface } from "./agent-surface.mjs";
 import { makeAgentRow, orderAgents } from "./agent-catalog.mjs";
 import { createAliasBook, defaultAliasFile, defaultLegacyAliasFile } from "./alias.mjs";
 import { applyConversationEvent, deriveToolEventViews, projectConversation } from "./conversation.mjs";
@@ -21,9 +22,6 @@ const INACTIVE = "DSH session is not active";
 const NOT_FOUND = "DSH session not found";
 const CHILD_ORIGIN = "subagent";
 const PROJECTS_ALIAS = "projects";
-const PROJECTS_WRITE_TOOLS = Object.freeze(["bash", "write", "edit"]);
-const PROJECTS_WRITE_REASON =
-  "this session does not write the filesystem; project create/retire is host tools";
 // AgentHandles are DSH-owned capabilities. Keep the capability on the live
 // Agent so a qq fiber replacement can rebuild its index without owning or
 // disposing the Agent itself.
@@ -138,43 +136,19 @@ function selectionSetup(selection) {
   };
 }
 
-function toolsOf(agentCtx) {
-  return agentCtx?.tools ?? agentCtx?.get?.("tools", false) ?? null;
-}
-
-function fenceProjectsTools(agentCtx) {
-  const tools = toolsOf(agentCtx);
-  if (!tools) return;
-  if (typeof tools.restrict === "function") {
-    try {
-      tools.restrict({ deny: [...PROJECTS_WRITE_TOOLS] });
-    } catch {
-      // Visibility hide is best-effort; guard is the fence.
-    }
-  }
-  if (typeof tools.guard === "function") {
-    try {
-      tools.guard((execution) => {
-        const name = execution?.name;
-        if (PROJECTS_WRITE_TOOLS.includes(name)) return PROJECTS_WRITE_REASON;
-        return undefined;
-      });
-    } catch {
-      // A missing guard API must not block session create.
-    }
-  }
-}
-
-function projectsSetup(selection) {
-  const select = selectionSetup(selection);
+function composeSetup(surface, setup, options) {
   return (agentCtx) => {
-    fenceProjectsTools(agentCtx);
-    return select(agentCtx);
+    surface?.setup(agentCtx, options);
+    return setup?.(agentCtx);
   };
 }
 
-function homeSetup(selection) {
-  return selectionSetup(selection);
+function projectsSetup(selection, surface) {
+  return composeSetup(surface, selectionSetup(selection), { projects: true });
+}
+
+function homeSetup(selection, surface) {
+  return composeSetup(surface, selectionSetup(selection));
 }
 
 function httpError(status, message, code) {
@@ -759,11 +733,11 @@ export function createQqService(ctx, config) {
   if (!agents || !sessions || !persistence) {
     throw new Error("qq: required DSH services are unavailable");
   }
+  const surface = createAgentSurface(ctx);
 
   const agentPromises = new Map();
   const handles = new Map();
   const unpublished = new Set();
-  const fencedProjects = new WeakSet();
   const statusSince = new Map();
   const projections = new Map();
   const sessionObservers = new Map();
@@ -861,14 +835,16 @@ export function createQqService(ctx, config) {
     return canonicalCwd(cwd);
   }
 
-  wrapDelegateAgentCreate(agents, (options) => {
-    const meta = options?.meta;
+  wrapDelegateAgentCreate(agents, (options = {}) => {
+    const meta = options.meta;
     const child = meta?.origin === CHILD_ORIGIN
       || (meta?.parentSession !== undefined && meta?.parentSession !== null);
-    if (!child || !samePath(meta?.cwd, projectsRoot)) return options;
+    const transformed = child && samePath(meta?.cwd, projectsRoot)
+      ? { ...options, meta: { ...meta, cwd: gitRootForDelegate(projectsRoot) } }
+      : options;
     return {
-      ...options,
-      meta: { ...meta, cwd: gitRootForDelegate(projectsRoot) },
+      ...transformed,
+      setup: composeSetup(surface, transformed.setup),
     };
   });
 
@@ -1281,19 +1257,16 @@ export function createQqService(ctx, config) {
   async function resumeChair(sessionId, header) {
     const cwd = header?.cwd;
     const isProjects = samePath(cwd, projectsRoot);
-    const project = projectForCwd(cwd);
     const setup = isProjects
-      ? projectsSetup({ current: selectedModel })
-      : project
-        ? selectionSetup({ current: selectedModel })
-        : homeSetup({ current: selectedModel });
+      ? projectsSetup({ current: selectedModel }, surface)
+      : homeSetup({ current: selectedModel }, surface);
     const handle = rememberHandle(await agents.resume({
       resumeSessionId: sessionId,
       agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
       setup,
     }));
     await ctx.get("loader")?.await();
-    if (isProjects) fencedProjects.add(handle.agent ?? handle);
+    if (isProjects) surface.fenceProjects(handle.agent ?? handle);
     syncLive(sessionId);
     return handle.agent ?? handle;
   }
@@ -1354,7 +1327,7 @@ export function createQqService(ctx, config) {
       } else {
         const headers = await persistedHeaders();
         const persisted = headers.find((header) => header.id === defaultSessionId);
-        const setup = selectionSetup({ current: selectedModel });
+        const setup = homeSetup({ current: selectedModel }, surface);
         const options = {
           agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
           setup,
@@ -1678,7 +1651,7 @@ export function createQqService(ctx, config) {
       : project.cwd;
     await ctx.get("loader")?.await();
     const sessionId = `session-${randomUUID()}`;
-    const setup = selectionSetup({ current: selectedModel });
+    const setup = homeSetup({ current: selectedModel }, surface);
     const handle = rememberHandle(await agents.create({
       sessionId,
       meta: { cwd },
@@ -1715,7 +1688,7 @@ export function createQqService(ctx, config) {
     try {
       cwd = scratch.create(sessionId);
       scratch.verify(sessionId);
-      const setup = selectionSetup({ current: selectedModel });
+      const setup = homeSetup({ current: selectedModel }, surface);
       handle = rememberHandle(await agents.create({
         sessionId,
         meta: { cwd },
@@ -1756,9 +1729,8 @@ export function createQqService(ctx, config) {
   }
 
   function fenceProjectsAgent(agent) {
-    if (!agent || fencedProjects.has(agent)) return;
-    fenceProjectsTools(agent.ctx);
-    fencedProjects.add(agent);
+    if (!agent) return;
+    surface.fenceProjects(agent);
   }
 
   function projectsRow(agent) {
@@ -1782,7 +1754,7 @@ export function createQqService(ctx, config) {
         sessionId,
         meta: { cwd: projectsRoot },
         agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
-        setup: projectsSetup({ current: selectedModel }),
+        setup: projectsSetup({ current: selectedModel }, surface),
       }));
       await sessions.flush(handle.agent.session);
     } catch (error) {
@@ -1793,7 +1765,7 @@ export function createQqService(ctx, config) {
       throw error;
     }
     const agent = handle.agent;
-    fencedProjects.add(agent);
+    surface.fenceProjects(agent);
     syncLive(agent.session.id);
     // During replacement both Projects Agents are briefly live. Explicitly
     // transfer the unique reserved alias to the freshly minted chair rather
@@ -2206,6 +2178,7 @@ export function createQqService(ctx, config) {
     },
     alias: liveAlias,
     resolve: resolveAlias,
+    surface,
     async create(projectName, folderName) {
       const project = projectByName(projectName ?? defaultProject);
       let folderCwd;
