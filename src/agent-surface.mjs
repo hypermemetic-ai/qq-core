@@ -1,4 +1,5 @@
 const SKILL_TOOL = "skill";
+const PROJECTS_FENCE = Symbol.for("@hypermemetic-ai/qq-core/projects-fence");
 const PROJECTS_WRITE_TOOLS = Object.freeze(["bash", "write", "edit"]);
 const PROJECTS_WRITE_SET = new Set(PROJECTS_WRITE_TOOLS);
 const PROJECTS_WRITE_REASON =
@@ -97,15 +98,37 @@ function dispose(effect) {
   try { effect?.(); } catch {}
 }
 
+function markProjects(agent) {
+  if (!agent || (typeof agent !== "object" && typeof agent !== "function")) return;
+  try {
+    Object.defineProperty(agent, PROJECTS_FENCE, {
+      value: true,
+      configurable: true,
+    });
+  } catch {
+    try { agent[PROJECTS_FENCE] = true; } catch {}
+  }
+}
+
 /**
  * Own the inherited DSH surface for every QQ agent. The allow-list is empty by
  * default and is replaced (never intersected) by {@link allow}.
  */
-export function createAgentSurface(ctx) {
+export function createAgentSurface(ctx, options = {}) {
   const byAgent = new WeakMap();
   const byContext = new WeakMap();
   const states = new Set();
   const rootEffects = [];
+  let disposed = false;
+
+  function isProjectsAgent(agent) {
+    if (typeof options.isProjects !== "function") return false;
+    try { return Boolean(options.isProjects(agent)); } catch { return false; }
+  }
+
+  function projectsRequested(agent, extra = {}) {
+    return Boolean(extra.projects || agent?.[PROJECTS_FENCE] || isProjectsAgent(agent));
+  }
 
   function effectiveNames(state) {
     return state.allow.filter((name) => {
@@ -229,11 +252,12 @@ export function createAgentSurface(ctx) {
     return { ...result, tools, sections };
   }
 
-  function install(agentCtx, options = {}) {
+  function install(agentCtx, extra = {}) {
+    if (disposed) return undefined;
     if (!agentCtx || (typeof agentCtx !== "object" && typeof agentCtx !== "function")) return undefined;
     let state = byContext.get(agentCtx);
     if (state) {
-      if (options.projects && !state.projects) {
+      if (extra.projects && !state.projects) {
         state.projects = true;
         applyRestriction(state);
       }
@@ -247,7 +271,7 @@ export function createAgentSurface(ctx) {
       allow: [],
       effective: new Set(),
       inherited: inheritedNames(tools),
-      projects: Boolean(options.projects),
+      projects: Boolean(extra.projects),
       skillAvailable: false,
       skillGeneration: 0,
       skillSync: undefined,
@@ -312,16 +336,19 @@ export function createAgentSurface(ctx) {
     return state;
   }
 
-  function apply(agent, options = {}) {
+  function apply(agent, extra = {}) {
+    if (disposed) return undefined;
     if (!agent || (typeof agent !== "object" && typeof agent !== "function")) return undefined;
+    const projects = projectsRequested(agent, extra);
     let state = byAgent.get(agent);
     if (!state) {
-      state = install(agent.ctx, options);
+      state = install(agent.ctx, { ...extra, projects });
       if (!state) return undefined;
       state.agent = agent;
       byAgent.set(agent, state);
     }
-    if (options.projects && !state.projects) {
+    if (projects || state.projects) markProjects(agent);
+    if (projects && !state.projects) {
       state.projects = true;
       applyRestriction(state);
     }
@@ -370,12 +397,16 @@ export function createAgentSurface(ctx) {
 
   const agents = serviceOf(ctx, "agents");
   if (typeof agents?.list === "function") {
+    // Plugin unload drops plugin-fiber restrictions. Rehome live agents and
+    // restore the Projects write fence from cwd (`isProjects`) or the mark
+    // left on the Agent so a later allow() cannot grant bash/write/edit.
     for (const agent of agents.list()) apply(agent);
   }
 
   const surface = Object.freeze({ allow, apply, fenceProjects, setup: install });
   if (typeof ctx?.effect === "function") {
     ctx.effect(() => () => {
+      disposed = true;
       for (const effect of rootEffects.reverse()) dispose(effect);
       for (const state of [...states]) releaseState(state);
     }, "qq-core: default-deny agent surface");
