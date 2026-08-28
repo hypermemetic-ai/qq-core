@@ -20,9 +20,7 @@
   "files": [
     "src/",
     "bin/",
-    "config/",
     "dsh/",
-    "openwiki/",
     "systemd/",
     "host.patch.yml",
     "project-catalog.json",
