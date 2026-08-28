@@ -1,10 +1,44 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createQqService } from "../src/session.mjs";
+
+const packageRoot = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
+
+function siblingProject(name) {
+  const envName = `QQ_${name.replace(/^qq-/, "").toUpperCase().replaceAll("-", "_")}_ROOT`;
+  const configured = process.env[envName];
+  const candidates = [configured, join(dirname(packageRoot), name)];
+  try {
+    const origin = execFileSync("git", ["-C", packageRoot, "remote", "get-url", "origin"], {
+      encoding: "utf8",
+    }).trim();
+    if (origin.startsWith("/")) candidates.push(join(dirname(realpathSync(origin)), name));
+  } catch {
+    // The ordinary sibling layout remains authoritative when origin is remote.
+  }
+  const root = candidates.find((candidate) => candidate && existsSync(join(candidate, "package.json")));
+  if (!root) throw new Error(`missing sibling project ${name}`);
+  return realpathSync(root);
+}
+
+const workflowsRoot = siblingProject("qq-workflows");
+const { createArchitect } = await import(pathToFileURL(join(workflowsRoot, "src/architect.mjs")));
+const { createLand } = await import(pathToFileURL(join(workflowsRoot, "src/land.mjs")));
+const { createLandStore } = await import(pathToFileURL(join(workflowsRoot, "src/land-store.mjs")));
 
 const BOOT_ID = "session-10000000-0000-4000-8000-000000000001";
 const OLD_PROJECTS_ID = "session-20000000-0000-4000-8000-000000000002";
@@ -18,7 +52,13 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
   const projectsRoot = join(root, "projects");
   const bootCwd = join(projectsRoot, "qq-core");
   mkdirSync(bootCwd, { recursive: true });
-  execFileSync("git", ["init", "--quiet", bootCwd]);
+  execFileSync("git", ["init", "--quiet", "--initial-branch=main", bootCwd]);
+  execFileSync("git", ["-C", bootCwd, "config", "user.name", "Projects Chair Test"]);
+  execFileSync("git", ["-C", bootCwd, "config", "user.email", "projects-chair@test"]);
+  execFileSync("git", ["-C", bootCwd, "config", "commit.gpgsign", "false"]);
+  writeFileSync(join(bootCwd, "README.md"), "projects chair delegate fixture\n");
+  execFileSync("git", ["-C", bootCwd, "add", "README.md"]);
+  execFileSync("git", ["-C", bootCwd, "commit", "--quiet", "-m", "fixture"]);
 
   const headers = new Map();
   const store = new Map();
@@ -31,32 +71,72 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     return { id, cwd, createdAt: Date.now() };
   }
 
-  function makeAgent(id, cwd, setup) {
+  function makeAgent(id, metaOrCwd, setup) {
+    const meta = typeof metaOrCwd === "string" ? { cwd: metaOrCwd } : metaOrCwd;
     const restricted = [];
     const guards = [];
+    const listeners = [];
+    const registered = new Map([["bash", { name: "bash", async execute() {} }]]);
     const tools = {
-      restrict(rule) { restricted.push(...(rule?.deny ?? [])); },
-      guard(fn) { guards.push(fn); },
+      restrict(rule) {
+        restricted.push(...(rule?.deny ?? []));
+        return () => {};
+      },
+      guard(fn) {
+        guards.push(fn);
+        return () => {};
+      },
+      register(definition) {
+        const previous = registered.get(definition.name);
+        registered.set(definition.name, definition);
+        return () => {
+          if (previous) registered.set(definition.name, previous);
+          else registered.delete(definition.name);
+        };
+      },
+      get(name) { return registered.get(name); },
+    };
+    const systemPrompt = {
+      section() { return () => {}; },
+      suppressRuntimeContext() {},
     };
     const agentCtx = {
       tools,
-      get(name) { return name === "tools" ? tools : undefined; },
-      on() {},
+      systemPrompt,
+      get(name) {
+        if (name === "tools") return tools;
+        if (name === "systemPrompt") return systemPrompt;
+        return undefined;
+      },
+      on(type, listener) {
+        const record = { type, listener };
+        listeners.push(record);
+        return () => {
+          const index = listeners.indexOf(record);
+          if (index >= 0) listeners.splice(index, 1);
+        };
+      },
     };
     setup?.(agentCtx);
     if (setup) setupRecords.push({ id, restricted, guards });
-    return {
+    const agent = {
       status: "idle",
       ctx: agentCtx,
+      inbox: { nextTurn: [], nextStep: [] },
       session: {
         id,
-        header: header(id, cwd),
+        header: { ...header(id, meta.cwd), ...meta },
         events: [],
         seq: 0,
       },
       cancel() {},
+      followup(message) {
+        agent.status = "running";
+        agent.inbox.nextTurn.push(message);
+      },
       async whenIdle() {},
     };
+    return agent;
   }
 
   function addExisting(id, cwd) {
@@ -88,7 +168,7 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
         createFailure = undefined;
         throw error;
       }
-      const agent = makeAgent(options.sessionId, options.meta.cwd, options.setup);
+      const agent = makeAgent(options.sessionId, options.meta, options.setup);
       store.set(agent.session.id, agent);
       return handleFor(agent);
     },
@@ -137,11 +217,14 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     rng: () => 0,
     now: () => 1,
   });
+  services.set("qq", service);
 
   return {
     root,
     service,
     agents,
+    ctx,
+    setService(name, value) { services.set(name, value); },
     files,
     setupRecords,
     get createCalls() { return createCalls; },
@@ -170,6 +253,19 @@ function assertUnfenced(fixture, id) {
   assert.ok(setup, `missing setup record for ${id}`);
   assert.deepEqual(setup.restricted, []);
   assert.deepEqual(setup.guards, []);
+}
+
+function assertNotProjectsFenced(fixture, id) {
+  const setup = fixture.setupRecords.find((record) => record.id === id);
+  assert.ok(setup, `missing setup record for ${id}`);
+  for (const name of ["bash", "write", "edit"]) {
+    assert.equal(setup.restricted.includes(name), false, `${name} inherited the projects-chair fence`);
+  }
+  assert.equal(
+    setup.guards.some((guard) => ["bash", "write", "edit"].some((name) => guard({ name }) !== undefined)),
+    false,
+    "implementer inherited the projects-chair filesystem guard",
+  );
 }
 
 function assertProjectsFence(fixture, id) {
@@ -252,6 +348,75 @@ async function replacement(command, action) {
     assertUnfenced(fixture, PARENT_CHILD_ID);
     assertUnfenced(fixture, PROJECT_CHILD_ID);
   } finally {
+    fixture.cleanup();
+  }
+}
+
+{
+  const fixture = makeFixture({ liveProjects: false });
+  let architect;
+  let land;
+  let adoption;
+  try {
+    fixture.setService("qq-relay", {
+      hang() {},
+      clear() {},
+      alias: () => "projects",
+      async send() { return { status: "sent" }; },
+    });
+    land = createLand({
+      ctx: fixture.ctx,
+      store: createLandStore(join(fixture.root, "land")),
+      agents: fixture.agents,
+      tasks: { async archive(id) { return id; } },
+      complete: async () => "land",
+      github: {},
+    });
+    architect = createArchitect({
+      ctx: fixture.ctx,
+      cases: {
+        open() {},
+        ensure() {},
+        load() { return { text: "# Implement\n\nDelegate from the projects chair.\n" }; },
+        taskId() { return "projects-chair"; },
+        consume() { return "projects-chair"; },
+      },
+      folder: { pending: () => undefined, decide: () => ({ action: "keep" }) },
+      agents: fixture.agents,
+      onInvokeChild: async (child, info) => {
+        adoption = await land.adoptImplementer(child, info);
+        return adoption;
+      },
+    });
+
+    const projects = await fixture.service.createProjects();
+    const parent = fixture.agents.get(projects.id);
+    architect.attach(parent);
+    const delegated = await architect.delegate({ agent: parent });
+
+    assert.equal(delegated.status, "ok", delegated.reason);
+    const child = fixture.agents.get(delegated.child);
+    assert.ok(child, "delegated implementer must remain live after Land adoption");
+    const childCwd = realpathSync(child.session.header.cwd);
+    const gitRoot = realpathSync(fixture.service.gitRootForDelegate(fixture.service.projectsRoot));
+    assert.notEqual(childCwd, realpathSync(fixture.service.projectsRoot));
+    assert.notEqual(childCwd, gitRoot, "delegate must use an isolated capsule, not the primary checkout");
+    assert.equal(
+      execFileSync("git", ["-C", childCwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(),
+      childCwd,
+    );
+    assert.ok(statSync(join(childCwd, ".git")).isDirectory(), "capsule must own an internal .git directory");
+    assert.equal(adoption?.status, "ok", adoption?.reason);
+    assert.doesNotMatch(adoption?.reason ?? "", /not a git worktree/i);
+    assert.equal(adoption?.owned, true);
+    assert.deepEqual(land.ownedChildren(), [delegated.child]);
+    assert.equal(realpathSync(land.bySession(delegated.child).worktree), childCwd);
+    assertProjectsFence(fixture, projects.id);
+    assertNotProjectsFenced(fixture, delegated.child);
+  } finally {
+    await adoption?.rollback?.("projects-chair test cleanup");
+    await architect?.dispose?.();
+    await land?.dispose?.();
     fixture.cleanup();
   }
 }
