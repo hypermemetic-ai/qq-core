@@ -21,9 +21,6 @@ const INACTIVE = "DSH session is not active";
 const NOT_FOUND = "DSH session not found";
 const CHILD_ORIGIN = "subagent";
 const PROJECTS_ALIAS = "projects";
-const PROJECTS_WRITE_TOOLS = Object.freeze(["bash", "write", "edit"]);
-const PROJECTS_WRITE_REASON =
-  "this session does not write the filesystem; project create/retire is host tools";
 // AgentHandles are DSH-owned capabilities. Keep the capability on the live
 // Agent so a qq fiber replacement can rebuild its index without owning or
 // disposing the Agent itself.
@@ -135,41 +132,6 @@ function selectionSetup(selection) {
           : {}),
       };
     });
-  };
-}
-
-function toolsOf(agentCtx) {
-  return agentCtx?.tools ?? agentCtx?.get?.("tools", false) ?? null;
-}
-
-function fenceProjectsTools(agentCtx) {
-  const tools = toolsOf(agentCtx);
-  if (!tools) return;
-  if (typeof tools.restrict === "function") {
-    try {
-      tools.restrict({ deny: [...PROJECTS_WRITE_TOOLS] });
-    } catch {
-      // Visibility hide is best-effort; guard is the fence.
-    }
-  }
-  if (typeof tools.guard === "function") {
-    try {
-      tools.guard((execution) => {
-        const name = execution?.name;
-        if (PROJECTS_WRITE_TOOLS.includes(name)) return PROJECTS_WRITE_REASON;
-        return undefined;
-      });
-    } catch {
-      // A missing guard API must not block session create.
-    }
-  }
-}
-
-function projectsSetup(selection) {
-  const select = selectionSetup(selection);
-  return (agentCtx) => {
-    fenceProjectsTools(agentCtx);
-    return select(agentCtx);
   };
 }
 
@@ -763,7 +725,6 @@ export function createQqService(ctx, config) {
   const agentPromises = new Map();
   const handles = new Map();
   const unpublished = new Set();
-  const fencedProjects = new WeakSet();
   const statusSince = new Map();
   const projections = new Map();
   const sessionObservers = new Map();
@@ -1282,18 +1243,15 @@ export function createQqService(ctx, config) {
     const cwd = header?.cwd;
     const isProjects = samePath(cwd, projectsRoot);
     const project = projectForCwd(cwd);
-    const setup = isProjects
-      ? projectsSetup({ current: selectedModel })
-      : project
-        ? selectionSetup({ current: selectedModel })
-        : homeSetup({ current: selectedModel });
+    const setup = isProjects || project
+      ? selectionSetup({ current: selectedModel })
+      : homeSetup({ current: selectedModel });
     const handle = rememberHandle(await agents.resume({
       resumeSessionId: sessionId,
       agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
       setup,
     }));
     await ctx.get("loader")?.await();
-    if (isProjects) fencedProjects.add(handle.agent ?? handle);
     syncLive(sessionId);
     return handle.agent ?? handle;
   }
@@ -1755,12 +1713,6 @@ export function createQqService(ctx, config) {
     };
   }
 
-  function fenceProjectsAgent(agent) {
-    if (!agent || fencedProjects.has(agent)) return;
-    fenceProjectsTools(agent.ctx);
-    fencedProjects.add(agent);
-  }
-
   function projectsRow(agent) {
     const id = agent.session.id;
     const alias = book.aliasFor(id);
@@ -1782,7 +1734,7 @@ export function createQqService(ctx, config) {
         sessionId,
         meta: { cwd: projectsRoot },
         agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
-        setup: projectsSetup({ current: selectedModel }),
+        setup: selectionSetup({ current: selectedModel }),
       }));
       await sessions.flush(handle.agent.session);
     } catch (error) {
@@ -1793,7 +1745,6 @@ export function createQqService(ctx, config) {
       throw error;
     }
     const agent = handle.agent;
-    fencedProjects.add(agent);
     syncLive(agent.session.id);
     // During replacement both Projects Agents are briefly live. Explicitly
     // transfer the unique reserved alias to the freshly minted chair rather
@@ -1808,7 +1759,6 @@ export function createQqService(ctx, config) {
     await ctx.get("loader")?.await();
     const live = liveProjectsAgents()[0];
     if (live) {
-      fenceProjectsAgent(live);
       syncLive(live.session.id);
       book.pin(live.session.id, PROJECTS_ALIAS);
       persistLiveChairs();
