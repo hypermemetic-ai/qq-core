@@ -268,15 +268,11 @@ function assertNotProjectsFenced(fixture, id) {
   );
 }
 
-function assertProjectsFence(fixture, id) {
+function assertProjectsUnfenced(fixture, id) {
   const setup = fixture.setupRecords.find((record) => record.id === id);
   assert.ok(setup, `missing setup record for ${id}`);
-  assert.deepEqual(new Set(setup.restricted), new Set(["bash", "write", "edit"]));
-  assert.equal(setup.guards.length, 1);
-  for (const name of ["bash", "write", "edit"]) {
-    assert.match(setup.guards[0]({ name }), /does not write the filesystem/);
-  }
-  assert.equal(setup.guards[0]({ name: "read" }), undefined);
+  assert.deepEqual(setup.restricted, [], "Projects chair tools must remain visible");
+  assert.deepEqual(setup.guards, [], "Projects chair tools must remain executable");
 }
 
 async function replacement(command, action) {
@@ -295,7 +291,7 @@ async function replacement(command, action) {
     assert.deepEqual(projectsAgents(fixture).map((agent) => agent.session.id), [result.id]);
     assert.deepEqual(persistedProjectsRows(fixture).map((row) => row.id), [result.id]);
     assert.equal(projectsAliasHolder(fixture), result.id);
-    assertProjectsFence(fixture, result.id);
+    assertProjectsUnfenced(fixture, result.id);
     return result.id;
   } finally {
     fixture.cleanup();
@@ -343,7 +339,7 @@ async function replacement(command, action) {
     })).agent;
     assert.equal(projectChild.session.header.cwd, gitRoot);
 
-    assertProjectsFence(fixture, projects.id);
+    assertProjectsUnfenced(fixture, projects.id);
     assertUnfenced(fixture, ORIGIN_CHILD_ID);
     assertUnfenced(fixture, PARENT_CHILD_ID);
     assertUnfenced(fixture, PROJECT_CHILD_ID);
@@ -411,7 +407,7 @@ async function replacement(command, action) {
     assert.equal(adoption?.owned, true);
     assert.deepEqual(land.ownedChildren(), [delegated.child]);
     assert.equal(realpathSync(land.bySession(delegated.child).worktree), childCwd);
-    assertProjectsFence(fixture, projects.id);
+    assertProjectsUnfenced(fixture, projects.id);
     assertNotProjectsFenced(fixture, delegated.child);
   } finally {
     await adoption?.rollback?.("projects-chair test cleanup");
@@ -452,7 +448,7 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
     assert.deepEqual(projectsAgents(fixture).map((agent) => agent.session.id), [created.id]);
     assert.deepEqual(persistedProjectsRows(fixture).map((row) => row.id), [created.id]);
     assert.equal(projectsAliasHolder(fixture), created.id);
-    assertProjectsFence(fixture, created.id);
+    assertProjectsUnfenced(fixture, created.id);
   } finally {
     fixture.cleanup();
   }
@@ -466,7 +462,7 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
     assert.equal(fixture.createCalls, 0);
     assert.equal(fixture.resumeCalls, 1);
     assert.equal(projectsAliasHolder(fixture), STALE_PROJECTS_ID);
-    assertProjectsFence(fixture, STALE_PROJECTS_ID);
+    assertProjectsUnfenced(fixture, STALE_PROJECTS_ID);
   } finally {
     fixture.cleanup();
   }
