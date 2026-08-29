@@ -163,11 +163,12 @@ const qq = ctx.get("qq-core");
 qq.surface.allow(agent, ["bash"]); // replaces qq-core's [] for this agent
 ```
 
-The effective list is still bounded by core fences. `skill` remains hidden
-unless that session's catalog contains a model-invocable skill, and the
-Projects chair can never receive `bash`, `write`, or `edit`. Workflow-specific
-chair allow-lists belong in the workflow plugin; until it calls
-`qq.surface.allow`, its agents intentionally retain the empty stock surface.
+The `skill` tool remains hidden unless that session's catalog contains a
+model-invocable skill. Projects, home, and project chairs otherwise share the
+same empty stock surface and can receive inherited tools through
+`qq.surface.allow`. Workflow-specific chair allow-lists belong in the workflow
+plugin; until it calls `qq.surface.allow`, its agents intentionally retain the
+empty stock surface.
 
 Every operator project is an immediate-child repository under `projectsRoot`.
 Its `SessionHeader.cwd` is that repository root, so source files and the

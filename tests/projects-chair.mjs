@@ -76,7 +76,11 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     const restrictions = [];
     const guards = [];
     const listeners = [];
-    const inherited = new Map([["bash", { name: "bash", async execute() {} }]]);
+    const inherited = new Map([
+      ["bash", { name: "bash", async execute() {} }],
+      ["write", { name: "write", async execute() {} }],
+      ["edit", { name: "edit", async execute() {} }],
+    ]);
     const local = new Map();
     const tools = {
       restrict(filter) {
@@ -587,8 +591,21 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
 
     const reloaded = await fixture.service.createProjects();
     assert.equal(reloaded.id, projects.id);
-    fixture.service.surface.allow(fixture.agents.get(projects.id), ["bash", "write", "edit"]);
-    assertProjectsFence(fixture, projects.id);
+    const projectsAgent = fixture.agents.get(projects.id);
+    const allowed = fixture.service.surface.allow(projectsAgent, ["bash", "write", "edit"]);
+    assert.deepEqual(allowed, ["bash", "write", "edit"]);
+    const projectsSetup = fixture.setupRecords.find((record) => record.id === projects.id);
+    assert.deepEqual(
+      activeFilters(projectsSetup),
+      [{ allow: ["bash", "write", "edit"] }],
+      "Projects allow-list must replace the empty default after HMR",
+    );
+    for (const name of allowed) {
+      const tool = projectsAgent.ctx.tools.get(name, projectsAgent);
+      assert.equal(typeof tool?.execute, "function", `${name} must be visible on Projects`);
+      assert.equal(guardReason(projectsSetup, name), undefined, `${name} must be executable on Projects`);
+      await tool.execute();
+    }
 
     const home = await fixture.service.createHome();
     fixture.service.surface.allow(fixture.agents.get(home.id), ["bash"]);

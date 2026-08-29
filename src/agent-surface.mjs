@@ -1,9 +1,4 @@
 const SKILL_TOOL = "skill";
-const PROJECTS_FENCE = Symbol.for("@hypermemetic-ai/qq-core/projects-fence");
-const PROJECTS_WRITE_TOOLS = Object.freeze(["bash", "write", "edit"]);
-const PROJECTS_WRITE_SET = new Set(PROJECTS_WRITE_TOOLS);
-const PROJECTS_WRITE_REASON =
-  "this session does not write the filesystem; project create/retire is host tools";
 const DENIED_REASON = "this agent does not allow that inherited tool";
 const SKILL_REASON = "this session has no model-invocable skills";
 
@@ -98,49 +93,23 @@ function dispose(effect) {
   try { effect?.(); } catch {}
 }
 
-function markProjects(agent) {
-  if (!agent || (typeof agent !== "object" && typeof agent !== "function")) return;
-  try {
-    Object.defineProperty(agent, PROJECTS_FENCE, {
-      value: true,
-      configurable: true,
-    });
-  } catch {
-    try { agent[PROJECTS_FENCE] = true; } catch {}
-  }
-}
-
 /**
  * Own the inherited DSH surface for every QQ agent. The allow-list is empty by
  * default and is replaced (never intersected) by {@link allow}.
  */
-export function createAgentSurface(ctx, options = {}) {
+export function createAgentSurface(ctx) {
   const byAgent = new WeakMap();
   const byContext = new WeakMap();
   const states = new Set();
   const rootEffects = [];
   let disposed = false;
 
-  function isProjectsAgent(agent) {
-    if (typeof options.isProjects !== "function") return false;
-    try { return Boolean(options.isProjects(agent)); } catch { return false; }
-  }
-
-  function projectsRequested(agent, extra = {}) {
-    return Boolean(extra.projects || agent?.[PROJECTS_FENCE] || isProjectsAgent(agent));
-  }
-
   function effectiveNames(state) {
-    return state.allow.filter((name) => {
-      if (state.projects && PROJECTS_WRITE_SET.has(name)) return false;
-      if (name === SKILL_TOOL && !state.skillAvailable) return false;
-      return true;
-    });
+    return state.allow.filter((name) => name !== SKILL_TOOL || state.skillAvailable);
   }
 
   function isHardFenced(state, name) {
-    return (state.projects && PROJECTS_WRITE_SET.has(name))
-      || (name === SKILL_TOOL && !state.skillAvailable);
+    return name === SKILL_TOOL && !state.skillAvailable;
   }
 
   function isScopeLocal(state, name, agent) {
@@ -252,17 +221,13 @@ export function createAgentSurface(ctx, options = {}) {
     return { ...result, tools, sections };
   }
 
-  function install(agentCtx, extra = {}) {
+  function install(agentCtx) {
     if (disposed) return undefined;
     if (!agentCtx || (typeof agentCtx !== "object" && typeof agentCtx !== "function")) return undefined;
-    let state = byContext.get(agentCtx);
-    if (state) {
-      if (extra.projects && !state.projects) {
-        state.projects = true;
-        applyRestriction(state);
-      }
-      return state;
-    }
+    const existing = byContext.get(agentCtx);
+    if (existing) return existing;
+
+    let state;
 
     const tools = toolsOf(agentCtx);
     state = {
@@ -271,7 +236,6 @@ export function createAgentSurface(ctx, options = {}) {
       allow: [],
       effective: new Set(),
       inherited: inheritedNames(tools),
-      projects: Boolean(extra.projects),
       skillAvailable: false,
       skillGeneration: 0,
       skillSync: undefined,
@@ -295,7 +259,6 @@ export function createAgentSurface(ctx, options = {}) {
       try {
         const effect = tools.guard((execution) => {
           const name = execution?.name;
-          if (state.projects && PROJECTS_WRITE_SET.has(name)) return PROJECTS_WRITE_REASON;
           if (name === SKILL_TOOL && !state.skillAvailable) return SKILL_REASON;
           if (state.effective.has(name)) return undefined;
           if (isScopeLocal(state, name, execution?.agent)) return undefined;
@@ -336,21 +299,15 @@ export function createAgentSurface(ctx, options = {}) {
     return state;
   }
 
-  function apply(agent, extra = {}) {
+  function apply(agent) {
     if (disposed) return undefined;
     if (!agent || (typeof agent !== "object" && typeof agent !== "function")) return undefined;
-    const projects = projectsRequested(agent, extra);
     let state = byAgent.get(agent);
     if (!state) {
-      state = install(agent.ctx, { ...extra, projects });
+      state = install(agent.ctx);
       if (!state) return undefined;
       state.agent = agent;
       byAgent.set(agent, state);
-    }
-    if (projects || state.projects) markProjects(agent);
-    if (projects && !state.projects) {
-      state.projects = true;
-      applyRestriction(state);
     }
     return state;
   }
@@ -362,10 +319,6 @@ export function createAgentSurface(ctx, options = {}) {
     applyRestriction(state);
     if (state.allow.includes(SKILL_TOOL)) void syncSkill(state);
     return [...state.effective];
-  }
-
-  function fenceProjects(agent) {
-    return apply(agent, { projects: true });
   }
 
   function releaseState(state) {
@@ -397,13 +350,12 @@ export function createAgentSurface(ctx, options = {}) {
 
   const agents = serviceOf(ctx, "agents");
   if (typeof agents?.list === "function") {
-    // Plugin unload drops plugin-fiber restrictions. Rehome live agents and
-    // restore the Projects write fence from cwd (`isProjects`) or the mark
-    // left on the Agent so a later allow() cannot grant bash/write/edit.
+    // Plugin unload drops plugin-fiber restrictions. Rehome live agents so the
+    // current surface owns their one replaceable allow-list after HMR.
     for (const agent of agents.list()) apply(agent);
   }
 
-  const surface = Object.freeze({ allow, apply, fenceProjects, setup: install });
+  const surface = Object.freeze({ allow, apply, setup: install });
   if (typeof ctx?.effect === "function") {
     ctx.effect(() => () => {
       disposed = true;
@@ -416,8 +368,6 @@ export function createAgentSurface(ctx, options = {}) {
 
 export const internals = Object.freeze({
   DENIED_REASON,
-  PROJECTS_WRITE_REASON,
-  PROJECTS_WRITE_TOOLS,
   SKILL_REASON,
   SKILL_TOOL,
   instructionMessage,

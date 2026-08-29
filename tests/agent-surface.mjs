@@ -39,7 +39,7 @@ function makeHarness({ skills = [] } = {}) {
     },
   };
 
-  function makeAgent({ projects = false, rejectEmptyAllow = false } = {}) {
+  function makeAgent({ rejectEmptyAllow = false } = {}) {
     const local = new Map();
     const restrictions = [];
     const guards = [];
@@ -103,7 +103,7 @@ function makeHarness({ skills = [] } = {}) {
     };
     const agent = {
       ctx: agentCtx,
-      session: { id: `session-${agents.length}`, header: { cwd: projects ? "/projects" : "/work" } },
+      session: { id: `session-${agents.length}`, header: { cwd: "/work" } },
     };
     agents.push(agent);
 
@@ -288,19 +288,6 @@ const pluginInstructions = { source: { kind: "plugin", plugin: "agent-instructio
 {
   const harness = makeHarness();
   const surface = createAgentSurface(harness.root);
-  const fixture = harness.makeAgent({ projects: true });
-  surface.setup(fixture.agentCtx, { projects: true });
-  surface.apply(fixture.agent, { projects: true });
-  surface.allow(fixture.agent, ["bash", "write", "edit"]);
-  assert.deepEqual(fixture.restrictions.at(-1).filter, { allow: [] });
-  for (const name of ["bash", "write", "edit"]) {
-    assert.equal(fixture.guards[0]({ name, agent: fixture.agent }), internals.PROJECTS_WRITE_REASON);
-  }
-}
-
-{
-  const harness = makeHarness();
-  const surface = createAgentSurface(harness.root);
   const fixture = harness.makeAgent({ rejectEmptyAllow: true });
   surface.setup(fixture.agentCtx);
   surface.apply(fixture.agent);
@@ -321,45 +308,6 @@ const pluginInstructions = { source: { kind: "plugin", plugin: "agent-instructio
     assert.equal(fixture.guards[0]({ name: "future_tool", agent: fixture.agent }), internals.DENIED_REASON);
   } finally {
     inherited.delete("future_tool");
-  }
-}
-
-{
-  const harness = makeHarness();
-  const fixture = harness.makeAgent({ projects: true });
-  const surface1 = createAgentSurface(harness.root);
-  surface1.fenceProjects(fixture.agent);
-  harness.dispose();
-  const surface2 = createAgentSurface(harness.root);
-  const effective = surface2.allow(fixture.agent, ["bash", "write", "edit"]);
-  assert.deepEqual(effective, [], "reloaded surface must rehome the Projects fence");
-  assert.deepEqual(
-    fixture.restrictions.filter(({ active }) => active).map(({ filter }) => filter),
-    [{ allow: [] }],
-  );
-  for (const name of ["bash", "write", "edit"]) {
-    assert.equal(fixture.guards[0]({ name, agent: fixture.agent }), internals.PROJECTS_WRITE_REASON);
-  }
-}
-
-{
-  const harness = makeHarness();
-  const fixture = harness.makeAgent({ projects: true });
-  const surface1 = createAgentSurface(harness.root, {
-    isProjects: (agent) => agent === fixture.agent,
-  });
-  surface1.apply(fixture.agent);
-  harness.dispose();
-  const surface2 = createAgentSurface(harness.root, {
-    isProjects: (agent) => agent === fixture.agent,
-  });
-  surface2.allow(fixture.agent, ["bash", "write", "edit"]);
-  assert.deepEqual(
-    fixture.restrictions.filter(({ active }) => active).map(({ filter }) => filter),
-    [{ allow: [] }],
-  );
-  for (const name of ["bash", "write", "edit"]) {
-    assert.equal(fixture.guards[0]({ name, agent: fixture.agent }), internals.PROJECTS_WRITE_REASON);
   }
 }
 

@@ -756,11 +756,7 @@ export function createQqService(ctx, config) {
   if (!agents || !sessions || !persistence) {
     throw new Error("qq: required DSH services are unavailable");
   }
-  const surface = createAgentSurface(ctx, {
-    isProjects(agent) {
-      return samePath(agentCwd(agent), projectsRoot);
-    },
-  });
+  const surface = createAgentSurface(ctx);
 
   const agentPromises = new Map();
   const handles = new Map();
@@ -1268,8 +1264,7 @@ export function createQqService(ctx, config) {
     return next;
   }
 
-  async function resumeChair(sessionId, header) {
-    const cwd = header?.cwd;
+  async function resumeChair(sessionId) {
     const setup = homeSetup({ current: selectedModel }, surface);
     const handle = rememberHandle(await agents.resume({
       resumeSessionId: sessionId,
