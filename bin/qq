@@ -67,7 +67,7 @@ fi
 
 # Core is always loaded from this repository root. Only these named sibling
 # repositories are host parts; missing or mismatched siblings remove capability.
-export QQ_DSH_HAVE_UI=0 QQ_DSH_HAVE_RELAY=0 QQ_DSH_HAVE_INDEX=0 QQ_DSH_HAVE_WORKFLOWS=0
+export QQ_DSH_HAVE_UI=0 QQ_DSH_HAVE_RELAY=0 QQ_DSH_HAVE_INDEX=0 QQ_DSH_HAVE_DASHBOARD=0 QQ_DSH_HAVE_WORKFLOWS=0
 sibling_parent=$(cd -- "$root/.." && pwd -P)
 linked_roots=()
 add_named_sibling() {
@@ -87,6 +87,7 @@ add_named_sibling() {
 }
 add_named_sibling qq-ui '@hypermemetic-ai/qq-ui' QQ_DSH_HAVE_UI
 add_named_sibling qq-wiki '@hypermemetic-ai/qq-index' QQ_DSH_HAVE_INDEX
+add_named_sibling qq-dashboard '@hypermemetic-ai/qq-dashboard' QQ_DSH_HAVE_DASHBOARD
 add_named_sibling qq-workflows '@hypermemetic-ai/qq-workflows' QQ_DSH_HAVE_WORKFLOWS
 add_named_sibling qq-models '@hypermemetic-ai/qq-models'
 add_named_sibling qq-relay '@hypermemetic-ai/qq-relay' QQ_DSH_HAVE_RELAY
@@ -119,7 +120,8 @@ for (const siblingPath of siblingPaths) {
 }
 const managed = new Set([
   "@hypermemetic-ai/qq-core", "@hypermemetic-ai/qq-ui", "@hypermemetic-ai/qq-index",
-  "@hypermemetic-ai/qq-workflows", "@hypermemetic-ai/qq-models", "@hypermemetic-ai/qq-relay",
+  "@hypermemetic-ai/qq-dashboard", "@hypermemetic-ai/qq-workflows", "@hypermemetic-ai/qq-models",
+  "@hypermemetic-ai/qq-relay",
   "@hypermemetic-ai/qq-dictation", "@hypermemetic-ai/image-finder",
   "@hypermemetic-ai/media-box", "@hypermemetic-ai/sts2-companion",
 ]);

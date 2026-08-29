@@ -125,6 +125,11 @@
       config:
         settingsFile: !!js (process.env.XDG_CONFIG_HOME ?? `${process.env.HOME}/.config`) + '/qq/workflows-settings.json'
 
+    - id: qq-dashboard
+      name: '@hypermemetic-ai/qq-dashboard'
+      disabled: !!js process.env.QQ_DSH_HAVE_DASHBOARD !== '1'
+      inject: [qq-core]
+
     - id: qq-ui
       name: '@hypermemetic-ai/qq-ui'
       disabled: !!js process.env.QQ_DSH_HAVE_UI !== '1'
