@@ -134,15 +134,25 @@ stays the identity; the number is the face.
 service, `bin/qq`, `host.patch.yml`, the pinned DSH toolchain, the project
 catalog, and host documentation. It is not an index or containing product.
 
-The launcher always links this repository root, then links these sibling
-repositories when present: `qq-ui`, `qq-workflows`, `qq-models`, `qq-relay`,
-and `qq-dictation`. It also accepts the independent optional siblings
-`image-finder`, `media-box`, and `sts2-companion`. Missing siblings remove capabilities without
-preventing core from booting. There is no wildcard `qq-*` scan.
+The launcher always links this repository root, then links fixed sibling
+repositories only when their package identities are exact:
+`@hypermemetic-ai/qq-ui`, `@hypermemetic-ai/qq-index`,
+`@hypermemetic-ai/qq-workflows`, `@hypermemetic-ai/qq-models`,
+`@hypermemetic-ai/qq-relay`, and `@hypermemetic-ai/qq-dictation`. The
+checkout-directory argument `qq-wiki` is temporary and is admitted only when
+its identity is exactly `@hypermemetic-ai/qq-index`; it creates no runtime
+compatibility name. The launcher also accepts the independent optional siblings
+`@hypermemetic-ai/image-finder`,
+`@hypermemetic-ai/media-box`, and `@hypermemetic-ai/sts2-companion`. Missing or
+identity-mismatched siblings remove capabilities without preventing core from
+booting. There is no wildcard `qq-*` scan.
 
-HMR watches exactly the linked package roots. Plugins communicate through
-Cordis services, never sibling imports. `QQ_DSH_HAVE_RELAY` follows the
-in-process plugin at `../qq-relay`.
+HMR watches exactly the linked package roots, and the same roots are installed
+in the persistent DSH profile. Plugins communicate through Cordis services,
+never sibling imports. `QQ_DSH_HAVE_RELAY` gates the in-process `qq-relay`
+plugin. `QQ_DSH_HAVE_INDEX` likewise gates the optional `qq-index` plugin; the
+package main `src/plugin.mjs` provides only the `qq-index` service with
+`{ loadIndex, validateIndex }`.
 
 ### Agent tool surface
 
