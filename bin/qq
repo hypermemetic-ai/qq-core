@@ -100,6 +100,7 @@ add_optional_sibling() {
 }
 add_optional_sibling "${QQ_FIND_ROOT:-$sibling_parent/image-finder}" '@hypermemetic-ai/image-finder'
 add_optional_sibling "${QQ_MEDIA_ROOT:-$sibling_parent/media-box}" '@hypermemetic-ai/media-box'
+add_optional_sibling "${QQ_STS2_ROOT:-$sibling_parent/sts2-companion}" '@hypermemetic-ai/sts2-companion'
 
 # HMR watches exactly the source package roots linked into this profile.
 hmr_roots=("$root" ${linked_roots[@]+"${linked_roots[@]}"})
@@ -119,7 +120,7 @@ const managed = new Set([
   "@hypermemetic-ai/qq-core", "@hypermemetic-ai/qq-ui", "@hypermemetic-ai/qq-workflows",
   "@hypermemetic-ai/qq-models", "@hypermemetic-ai/qq-relay",
   "@hypermemetic-ai/qq-dictation", "@hypermemetic-ai/image-finder",
-  "@hypermemetic-ai/media-box",
+  "@hypermemetic-ai/media-box", "@hypermemetic-ai/sts2-companion",
 ]);
 try {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));

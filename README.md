@@ -137,7 +137,7 @@ catalog, and host documentation. It is not an index or containing product.
 The launcher always links this repository root, then links these sibling
 repositories when present: `qq-ui`, `qq-workflows`, `qq-models`, `qq-relay`,
 and `qq-dictation`. It also accepts the independent optional siblings
-`image-finder` and `media-box`. Missing siblings remove capabilities without
+`image-finder`, `media-box`, and `sts2-companion`. Missing siblings remove capabilities without
 preventing core from booting. There is no wildcard `qq-*` scan.
 
 HMR watches exactly the linked package roots. Plugins communicate through

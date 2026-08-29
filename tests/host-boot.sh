@@ -43,6 +43,7 @@ boot() {
     DSH_TELEMETRY_DISABLED=1 \
     QQ_PORT="$port" QQ_PROJECTS_ROOT="$projects" QQ_DSH_CWD="$sim" \
     QQ_FIND_ROOT="$scratch/missing-image-finder" QQ_MEDIA_ROOT="$scratch/missing-media-box" \
+    QQ_STS2_ROOT="$scratch/missing-sts2-companion" \
     QQ_DSH_SESSION_ID=session-63a11000-0000-4000-8000-0000000000aa \
     "$sim/bin/qq" >"$scratch/$name.out" 2>"$scratch/$name.err" &
   pid=$!
