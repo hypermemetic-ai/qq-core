@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,14 @@ const launcher = read("bin/qq");
 for (const sibling of ["qq-ui", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
   assert.match(launcher, new RegExp(`add_named_sibling ${sibling.replace("-", "\\-")}`));
 }
+assert.match(
+  launcher,
+  /add_named_sibling qq-wiki '@hypermemetic-ai\/qq-index' QQ_DSH_HAVE_INDEX/,
+);
+assert.match(launcher, /export .*QQ_DSH_HAVE_INDEX=0/);
+assert.equal(launcher.match(/add_named_sibling qq-wiki/g)?.length, 1);
+const managedPackages = launcher.slice(launcher.indexOf("const managed = new Set(["));
+assert.match(managedPackages, /"@hypermemetic-ai\/qq-index"/);
 assert.doesNotMatch(launcher, /qq-\\\*|qq-tasks|dsh-relay|dsh-dictation/);
 assert.match(launcher, /\["@hypermemetic-ai\/qq-core", corePath\]/);
 assert.doesNotMatch(launcher, /@hypermemetic-ai\/qq["/]/);
@@ -47,10 +55,27 @@ assert.doesNotMatch(launcher, /"\$root\/core"|"\$root"\/qq-\*/);
 const patch = read("host.patch.yml");
 assert.match(patch, /- id: qq-core\n\s+name: '@hypermemetic-ai\/qq-core'/);
 assert.match(patch, /inject: \[qq-core, webServer\]/);
+assert.match(
+  patch,
+  /- id: qq-index\n\s+name: '@hypermemetic-ai\/qq-index'\n\s+disabled: !!js process\.env\.QQ_DSH_HAVE_INDEX !== '1'/,
+);
+assert.ok(
+  patch.indexOf("    - id: qq-index") < patch.indexOf("    - id: qq-workflows"),
+  "qq-index must be inserted before qq-workflows",
+);
+assert.doesNotMatch(patch, /qq-wiki/);
 assert.doesNotMatch(patch, /- id: qq\n|name: '@hypermemetic-ai\/qq'|inject: \[qq, webServer\]/);
 assert.doesNotMatch(patch, /qq-tasks|dsh-relay|dsh-dictation/);
 assert.match(read("systemd/user/qq.service"), /WorkingDirectory=%h\/projects\/qq-core/);
 assert.match(read("systemd/user/qq.service"), /ExecStart=%h\/projects\/qq-core\/bin\/qq/);
+const readme = read("README.md");
+assert.match(readme, /`@hypermemetic-ai\/qq-index`/);
+assert.match(readme, /`QQ_DSH_HAVE_INDEX`.*optional `qq-index` plugin/);
+assert.match(readme, /checkout-directory argument `qq-wiki` is temporary/);
+assert.match(readme, /package main `src\/plugin\.mjs` provides only the `qq-index` service with\n`\{ loadIndex, validateIndex \}`/);
+for (const source of readdirSync(join(packageRoot, "src")).filter((name) => name.endsWith(".mjs"))) {
+  assert.doesNotMatch(read(`src/${source}`), /@hypermemetic-ai\/qq-index|qq-wiki/);
+}
 
 const scratch = mkdtempSync(join(tmpdir(), "qq-core-catalog-"));
 try {
