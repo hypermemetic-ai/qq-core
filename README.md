@@ -137,8 +137,9 @@ catalog, and host documentation. It is not an index or containing product.
 The launcher always links this repository root, then links fixed sibling
 repositories only when their package identities are exact:
 `@hypermemetic-ai/qq-ui`, `@hypermemetic-ai/qq-index`,
-`@hypermemetic-ai/qq-workflows`, `@hypermemetic-ai/qq-models`,
-`@hypermemetic-ai/qq-relay`, and `@hypermemetic-ai/qq-dictation`. The
+`@hypermemetic-ai/qq-dashboard`, `@hypermemetic-ai/qq-workflows`,
+`@hypermemetic-ai/qq-models`, `@hypermemetic-ai/qq-relay`, and
+`@hypermemetic-ai/qq-dictation`. The
 checkout-directory argument `qq-wiki` is temporary and is admitted only when
 its identity is exactly `@hypermemetic-ai/qq-index`; it creates no runtime
 compatibility name. The launcher also accepts the independent optional siblings
@@ -152,7 +153,11 @@ in the persistent DSH profile. Plugins communicate through Cordis services,
 never sibling imports. `QQ_DSH_HAVE_RELAY` gates the in-process `qq-relay`
 plugin. `QQ_DSH_HAVE_INDEX` likewise gates the optional `qq-index` plugin; the
 package main `src/plugin.mjs` provides only the `qq-index` service with
-`{ loadIndex, validateIndex }`.
+`{ loadIndex, validateIndex }`. `QQ_DSH_HAVE_DASHBOARD` gates the optional
+`qq-dashboard` plugin, whose `src/plugin.mjs` requires `qq-core` and provides
+the canonical `qq-dashboard` service. `qq-ui` may consume that service but
+retains its own fallback when the dashboard sibling is absent. Neither sibling
+has a compatibility alias.
 
 ### Agent tool surface
 

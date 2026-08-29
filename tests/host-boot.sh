@@ -62,6 +62,7 @@ boot core-only
 host_env="$scratch/core-only.env"
 tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
 grep -Fxq 'QQ_DSH_HAVE_INDEX=0' "$host_env"
+grep -Fxq 'QQ_DSH_HAVE_DASHBOARD=0' "$host_env"
 grep -Fxq "QQ_DSH_HMR_ROOTS=$sim" "$host_env"
 node - "$scratch/core-only-state/profiles/qq/package.json" "$sim" <<'NODE'
 const { readFileSync } = require("node:fs");
@@ -71,7 +72,7 @@ const deps = manifest.dependencies ?? {};
 if (!["link:", "file:"].some((prefix) => deps["@hypermemetic-ai/qq-core"] === `${prefix}${core}`)) {
   throw new Error(`core profile link is wrong: ${deps["@hypermemetic-ai/qq-core"]}`);
 }
-for (const name of ["qq-ui", "qq-index", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
+for (const name of ["qq-ui", "qq-index", "qq-dashboard", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
   if (deps[`@hypermemetic-ai/${name}`] !== undefined) throw new Error(`core-only boot linked ${name}`);
 }
 for (const name of Object.keys(deps)) {
@@ -82,7 +83,7 @@ for (const name of Object.keys(deps)) {
 NODE
 stop_host
 
-mkdir -p "$projects/qq-wiki"
+mkdir -p "$projects/qq-wiki" "$projects/qq-dashboard"
 cat >"$projects/qq-wiki/package.json" <<'JSON'
 {
   "name": "@hypermemetic-ai/not-qq-index",
@@ -92,43 +93,65 @@ cat >"$projects/qq-wiki/package.json" <<'JSON'
   "main": "src/plugin.mjs"
 }
 JSON
-boot index-identity-mismatch
-host_env="$scratch/index-identity-mismatch.env"
+cat >"$projects/qq-dashboard/package.json" <<'JSON'
+{
+  "name": "@hypermemetic-ai/not-qq-dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/plugin.mjs"
+}
+JSON
+boot identity-mismatch
+host_env="$scratch/identity-mismatch.env"
 tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
 grep -Fxq 'QQ_DSH_HAVE_INDEX=0' "$host_env"
+grep -Fxq 'QQ_DSH_HAVE_DASHBOARD=0' "$host_env"
 grep -Fxq "QQ_DSH_HMR_ROOTS=$sim" "$host_env"
-grep -Fq 'qq: ignoring sibling' "$scratch/index-identity-mismatch.err"
-grep -Fq 'with unexpected package identity' "$scratch/index-identity-mismatch.err"
-node - "$scratch/index-identity-mismatch-state/profiles/qq/package.json" <<'NODE'
+grep -Fq "qq: ignoring sibling $projects/qq-wiki with unexpected package identity" "$scratch/identity-mismatch.err"
+grep -Fq "qq: ignoring sibling $projects/qq-dashboard with unexpected package identity" "$scratch/identity-mismatch.err"
+node - "$scratch/identity-mismatch-state/profiles/qq/package.json" <<'NODE'
 const { readFileSync } = require("node:fs");
 const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
-if (manifest.dependencies?.["@hypermemetic-ai/qq-index"] !== undefined) {
-  throw new Error("identity-mismatched index sibling was linked");
+for (const name of ["qq-index", "qq-dashboard"]) {
+  if (manifest.dependencies?.[`@hypermemetic-ai/${name}`] !== undefined) {
+    throw new Error(`identity-mismatched ${name} sibling was linked`);
+  }
 }
 NODE
 stop_host
-rm -rf -- "$projects/qq-wiki"
+rm -rf -- "$projects/qq-wiki" "$projects/qq-dashboard"
 
 for name in qq-ui qq-workflows qq-models qq-relay qq-dictation; do
   ln -s "$parts/$name" "$projects/$name"
 done
-node - "$parts/qq-wiki/package.json" <<'NODE'
+node - "$parts/qq-wiki/package.json" "$parts/qq-dashboard/package.json" <<'NODE'
 const { readFileSync } = require("node:fs");
-const pkg = JSON.parse(readFileSync(process.argv[2], "utf8"));
-if (pkg.name !== "@hypermemetic-ai/qq-index") throw new Error(`unexpected index package: ${pkg.name}`);
-if (pkg.main !== "src/plugin.mjs") throw new Error(`unexpected index main: ${pkg.main}`);
+const index = JSON.parse(readFileSync(process.argv[2], "utf8"));
+if (index.name !== "@hypermemetic-ai/qq-index") throw new Error(`unexpected index package: ${index.name}`);
+if (index.main !== "src/plugin.mjs") throw new Error(`unexpected index main: ${index.main}`);
+const dashboard = JSON.parse(readFileSync(process.argv[3], "utf8"));
+if (dashboard.name !== "@hypermemetic-ai/qq-dashboard") {
+  throw new Error(`unexpected dashboard package: ${dashboard.name}`);
+}
+if (dashboard.main !== "src/plugin.mjs") throw new Error(`unexpected dashboard main: ${dashboard.main}`);
 NODE
 ln -s "$parts/qq-wiki" "$projects/qq-wiki"
+ln -s "$parts/qq-dashboard" "$projects/qq-dashboard"
 index_root=$(cd -- "$parts/qq-wiki" && pwd -P)
+dashboard_root=$(cd -- "$parts/qq-dashboard" && pwd -P)
 boot all-parts
 host_env="$scratch/all-parts.env"
 tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
 grep -Fxq 'QQ_DSH_HAVE_INDEX=1' "$host_env"
+grep -Fxq 'QQ_DSH_HAVE_DASHBOARD=1' "$host_env"
 hmr_roots=$(sed -n 's/^QQ_DSH_HMR_ROOTS=//p' "$host_env")
-case ":$hmr_roots:" in
-  *":$index_root:"*) ;;
-  *) echo "qq-index was not admitted to HMR roots: $hmr_roots" >&2; exit 1 ;;
-esac
+for sibling_root in "$index_root" "$dashboard_root"; do
+  case ":$hmr_roots:" in
+    *":$sibling_root:"*) ;;
+    *) echo "$sibling_root was not admitted to HMR roots: $hmr_roots" >&2; exit 1 ;;
+  esac
+done
 for _ in {1..300}; do
   curl -fsSL --max-time 2 "http://127.0.0.1:$port/qq/" >"$scratch/page" 2>/dev/null && break
   sleep 0.05
@@ -151,6 +174,7 @@ if (!["link:", "file:"].some((prefix) => deps["@hypermemetic-ai/qq-core"] === `$
 const siblings = [
   ["qq-ui", "@hypermemetic-ai/qq-ui"],
   ["qq-wiki", "@hypermemetic-ai/qq-index"],
+  ["qq-dashboard", "@hypermemetic-ai/qq-dashboard"],
   ["qq-workflows", "@hypermemetic-ai/qq-workflows"],
   ["qq-models", "@hypermemetic-ai/qq-models"],
   ["qq-relay", "@hypermemetic-ai/qq-relay"],

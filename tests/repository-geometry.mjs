@@ -33,7 +33,7 @@ for (const retired of ["tasks", "dsh-relay", "dsh-dictation"]) {
 }
 
 const launcher = read("bin/qq");
-for (const sibling of ["qq-ui", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
+for (const sibling of ["qq-ui", "qq-dashboard", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
   assert.match(launcher, new RegExp(`add_named_sibling ${sibling.replace("-", "\\-")}`));
 }
 assert.match(
@@ -41,9 +41,16 @@ assert.match(
   /add_named_sibling qq-wiki '@hypermemetic-ai\/qq-index' QQ_DSH_HAVE_INDEX/,
 );
 assert.match(launcher, /export .*QQ_DSH_HAVE_INDEX=0/);
+assert.match(
+  launcher,
+  /add_named_sibling qq-dashboard '@hypermemetic-ai\/qq-dashboard' QQ_DSH_HAVE_DASHBOARD/,
+);
+assert.match(launcher, /export .*QQ_DSH_HAVE_DASHBOARD=0/);
 assert.equal(launcher.match(/add_named_sibling qq-wiki/g)?.length, 1);
+assert.equal(launcher.match(/add_named_sibling qq-dashboard/g)?.length, 1);
 const managedPackages = launcher.slice(launcher.indexOf("const managed = new Set(["));
 assert.match(managedPackages, /"@hypermemetic-ai\/qq-index"/);
+assert.match(managedPackages, /"@hypermemetic-ai\/qq-dashboard"/);
 assert.doesNotMatch(launcher, /qq-\\\*|qq-tasks|dsh-relay|dsh-dictation/);
 assert.match(launcher, /\["@hypermemetic-ai\/qq-core", corePath\]/);
 assert.doesNotMatch(launcher, /@hypermemetic-ai\/qq["/]/);
@@ -59,9 +66,15 @@ assert.match(
   patch,
   /- id: qq-index\n\s+name: '@hypermemetic-ai\/qq-index'\n\s+disabled: !!js process\.env\.QQ_DSH_HAVE_INDEX !== '1'/,
 );
+assert.match(
+  patch,
+  /- id: qq-dashboard\n\s+name: '@hypermemetic-ai\/qq-dashboard'\n\s+disabled: !!js process\.env\.QQ_DSH_HAVE_DASHBOARD !== '1'\n\s+inject: \[qq-core\]/,
+);
+const hostOrder = ["qq-core", "qq-index", "qq-workflows", "qq-dashboard", "qq-ui"]
+  .map((id) => patch.indexOf(`    - id: ${id}`));
 assert.ok(
-  patch.indexOf("    - id: qq-index") < patch.indexOf("    - id: qq-workflows"),
-  "qq-index must be inserted before qq-workflows",
+  hostOrder.every((offset, index) => offset >= 0 && (index === 0 || hostOrder[index - 1] < offset)),
+  "host order must be core -> index -> workflows -> dashboard -> ui",
 );
 assert.doesNotMatch(patch, /qq-wiki/);
 assert.doesNotMatch(patch, /- id: qq\n|name: '@hypermemetic-ai\/qq'|inject: \[qq, webServer\]/);
@@ -73,8 +86,15 @@ assert.match(readme, /`@hypermemetic-ai\/qq-index`/);
 assert.match(readme, /`QQ_DSH_HAVE_INDEX`.*optional `qq-index` plugin/);
 assert.match(readme, /checkout-directory argument `qq-wiki` is temporary/);
 assert.match(readme, /package main `src\/plugin\.mjs` provides only the `qq-index` service with\n`\{ loadIndex, validateIndex \}`/);
+assert.match(readme, /`@hypermemetic-ai\/qq-dashboard`/);
+assert.match(readme, /`QQ_DSH_HAVE_DASHBOARD` gates the optional\n`qq-dashboard` plugin/);
+assert.match(readme, /`src\/plugin\.mjs` requires `qq-core` and provides\nthe canonical `qq-dashboard` service/);
+assert.match(readme, /Neither sibling\nhas a compatibility alias/);
 for (const source of readdirSync(join(packageRoot, "src")).filter((name) => name.endsWith(".mjs"))) {
-  assert.doesNotMatch(read(`src/${source}`), /@hypermemetic-ai\/qq-index|qq-wiki/);
+  assert.doesNotMatch(
+    read(`src/${source}`),
+    /@hypermemetic-ai\/(?:qq-index|qq-dashboard)|qq-wiki/,
+  );
 }
 
 const scratch = mkdtempSync(join(tmpdir(), "qq-core-catalog-"));
