@@ -114,10 +114,6 @@
       disabled: !!js process.env.QQ_DSH_HAVE_RELAY !== '1'
       inject: [agents, sessions]
 
-    - id: qq-index
-      name: '@hypermemetic-ai/qq-index'
-      disabled: !!js process.env.QQ_DSH_HAVE_INDEX !== '1'
-
     - id: qq-workflows
       name: '@hypermemetic-ai/qq-workflows'
       disabled: !!js process.env.QQ_DSH_HAVE_WORKFLOWS !== '1'

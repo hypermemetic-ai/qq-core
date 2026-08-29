@@ -59,10 +59,6 @@ boot() {
 }
 
 boot core-only
-host_env="$scratch/core-only.env"
-tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
-grep -Fxq 'QQ_DSH_HAVE_INDEX=0' "$host_env"
-grep -Fxq "QQ_DSH_HMR_ROOTS=$sim" "$host_env"
 node - "$scratch/core-only-state/profiles/qq/package.json" "$sim" <<'NODE'
 const { readFileSync } = require("node:fs");
 const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
@@ -71,7 +67,7 @@ const deps = manifest.dependencies ?? {};
 if (!["link:", "file:"].some((prefix) => deps["@hypermemetic-ai/qq-core"] === `${prefix}${core}`)) {
   throw new Error(`core profile link is wrong: ${deps["@hypermemetic-ai/qq-core"]}`);
 }
-for (const name of ["qq-ui", "qq-index", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
+for (const name of ["qq-ui", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
   if (deps[`@hypermemetic-ai/${name}`] !== undefined) throw new Error(`core-only boot linked ${name}`);
 }
 for (const name of Object.keys(deps)) {
@@ -82,53 +78,10 @@ for (const name of Object.keys(deps)) {
 NODE
 stop_host
 
-mkdir -p "$projects/qq-wiki"
-cat >"$projects/qq-wiki/package.json" <<'JSON'
-{
-  "name": "@hypermemetic-ai/not-qq-index",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "main": "src/plugin.mjs"
-}
-JSON
-boot index-identity-mismatch
-host_env="$scratch/index-identity-mismatch.env"
-tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
-grep -Fxq 'QQ_DSH_HAVE_INDEX=0' "$host_env"
-grep -Fxq "QQ_DSH_HMR_ROOTS=$sim" "$host_env"
-grep -Fq 'qq: ignoring sibling' "$scratch/index-identity-mismatch.err"
-grep -Fq 'with unexpected package identity' "$scratch/index-identity-mismatch.err"
-node - "$scratch/index-identity-mismatch-state/profiles/qq/package.json" <<'NODE'
-const { readFileSync } = require("node:fs");
-const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
-if (manifest.dependencies?.["@hypermemetic-ai/qq-index"] !== undefined) {
-  throw new Error("identity-mismatched index sibling was linked");
-}
-NODE
-stop_host
-rm -rf -- "$projects/qq-wiki"
-
 for name in qq-ui qq-workflows qq-models qq-relay qq-dictation; do
   ln -s "$parts/$name" "$projects/$name"
 done
-node - "$parts/qq-wiki/package.json" <<'NODE'
-const { readFileSync } = require("node:fs");
-const pkg = JSON.parse(readFileSync(process.argv[2], "utf8"));
-if (pkg.name !== "@hypermemetic-ai/qq-index") throw new Error(`unexpected index package: ${pkg.name}`);
-if (pkg.main !== "src/plugin.mjs") throw new Error(`unexpected index main: ${pkg.main}`);
-NODE
-ln -s "$parts/qq-wiki" "$projects/qq-wiki"
-index_root=$(cd -- "$parts/qq-wiki" && pwd -P)
 boot all-parts
-host_env="$scratch/all-parts.env"
-tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
-grep -Fxq 'QQ_DSH_HAVE_INDEX=1' "$host_env"
-hmr_roots=$(sed -n 's/^QQ_DSH_HMR_ROOTS=//p' "$host_env")
-case ":$hmr_roots:" in
-  *":$index_root:"*) ;;
-  *) echo "qq-index was not admitted to HMR roots: $hmr_roots" >&2; exit 1 ;;
-esac
 for _ in {1..300}; do
   curl -fsSL --max-time 2 "http://127.0.0.1:$port/qq/" >"$scratch/page" 2>/dev/null && break
   sleep 0.05
@@ -148,20 +101,10 @@ const core = process.argv[4];
 if (!["link:", "file:"].some((prefix) => deps["@hypermemetic-ai/qq-core"] === `${prefix}${core}`)) {
   throw new Error(`core profile link is wrong: ${deps["@hypermemetic-ai/qq-core"]}`);
 }
-const siblings = [
-  ["qq-ui", "@hypermemetic-ai/qq-ui"],
-  ["qq-wiki", "@hypermemetic-ai/qq-index"],
-  ["qq-workflows", "@hypermemetic-ai/qq-workflows"],
-  ["qq-models", "@hypermemetic-ai/qq-models"],
-  ["qq-relay", "@hypermemetic-ai/qq-relay"],
-  ["qq-dictation", "@hypermemetic-ai/qq-dictation"],
-];
-for (const [directory, packageName] of siblings) {
-  const path = realpathSync(join(parts, directory));
-  const value = deps[packageName];
-  if (value !== `link:${path}` && value !== `file:${path}`) {
-    throw new Error(`${packageName} profile link is wrong: ${value}`);
-  }
+for (const name of ["qq-ui", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
+  const path = realpathSync(join(parts, name));
+  const value = deps[`@hypermemetic-ai/${name}`];
+  if (value !== `link:${path}` && value !== `file:${path}`) throw new Error(`${name} profile link is wrong: ${value}`);
 }
 const bundles = manifest.dsh?.profile?.bundles ?? [];
 for (const name of ["@hypermemetic-ai/qq-models", "@hypermemetic-ai/qq-dictation"]) {
