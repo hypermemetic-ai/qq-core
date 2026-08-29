@@ -299,22 +299,26 @@ export function createAgentSurface(ctx) {
     return state;
   }
 
-  function apply(agent) {
+  function apply(agentOrCtx) {
     if (disposed) return undefined;
-    if (!agent || (typeof agent !== "object" && typeof agent !== "function")) return undefined;
-    let state = byAgent.get(agent);
+    if (!agentOrCtx || (typeof agentOrCtx !== "object" && typeof agentOrCtx !== "function")) return undefined;
+    let state = byAgent.get(agentOrCtx) ?? byContext.get(agentOrCtx);
     if (!state) {
-      state = install(agent.ctx);
-      if (!state) return undefined;
-      state.agent = agent;
-      byAgent.set(agent, state);
+      if (agentOrCtx.ctx) {
+        state = install(agentOrCtx.ctx);
+        if (!state) return undefined;
+        state.agent = agentOrCtx;
+        byAgent.set(agentOrCtx, state);
+      } else {
+        state = install(agentOrCtx);
+      }
     }
     return state;
   }
 
-  function allow(agent, names) {
-    const state = byAgent.get(agent) ?? apply(agent);
-    if (!state) throw new TypeError("qq-core.surface.allow requires a live agent with agent.ctx");
+  function allow(agentOrCtx, names) {
+    const state = byAgent.get(agentOrCtx) ?? byContext.get(agentOrCtx) ?? apply(agentOrCtx);
+    if (!state) throw new TypeError("qq-core.surface.allow requires a live agent or agent context");
     state.allow = normalizeNames(names);
     applyRestriction(state);
     if (state.allow.includes(SKILL_TOOL)) void syncSkill(state);

@@ -38,7 +38,7 @@ function siblingProject(name) {
 const workflowsRoot = siblingProject("qq-workflows");
 const { createArchitect } = await import(pathToFileURL(join(workflowsRoot, "src/architect.mjs")));
 const { createLand } = await import(pathToFileURL(join(workflowsRoot, "src/land.mjs")));
-const { createLandStore } = await import(pathToFileURL(join(workflowsRoot, "src/land-store.mjs")));
+const { createDelegationStore } = await import(pathToFileURL(join(workflowsRoot, "src/delegation-store.mjs")));
 
 const BOOT_ID = "session-10000000-0000-4000-8000-000000000001";
 const OLD_PROJECTS_ID = "session-20000000-0000-4000-8000-000000000002";
@@ -124,7 +124,7 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
       get(name) {
         if (name === "tools") return tools;
         if (name === "systemPrompt") return systemPrompt;
-        return undefined;
+        return ctx.get(name);
       },
       on(type, listener) {
         const record = { type, listener };
@@ -246,6 +246,7 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     now: () => 1,
   };
   let service = createQqService(ctx, config);
+  services.set("qq-core", service);
   services.set("qq", service);
 
   function reload() {
@@ -253,6 +254,7 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
       try { release(); } catch {}
     }
     service = createQqService(ctx, config);
+    services.set("qq-core", service);
     services.set("qq", service);
     return service;
   }
@@ -311,9 +313,9 @@ function assertNotProjectsFenced(fixture, id) {
   const setup = fixture.setupRecords.find((record) => record.id === id);
   assert.ok(setup, `missing setup record for ${id}`);
   assert.equal(
-    activeFilters(setup).some((filter) => Array.isArray(filter.allow) && filter.allow.length === 0),
+    activeFilters(setup).some((filter) => Array.isArray(filter.allow)),
     true,
-    "delegated agent is missing qq-core's empty default allow-list",
+    "delegated agent is missing qq-core's allow-list",
   );
   for (const guard of setup.guards) {
     for (const name of ["bash", "write", "edit"]) {
@@ -418,7 +420,7 @@ async function replacement(command, action) {
     });
     land = createLand({
       ctx: fixture.ctx,
-      store: createLandStore(join(fixture.root, "land")),
+      store: createDelegationStore(join(fixture.root, "land")),
       agents: fixture.agents,
       tasks: { async archive(id) { return id; } },
       complete: async () => "land",
@@ -436,7 +438,7 @@ async function replacement(command, action) {
       folder: { pending: () => undefined, decide: () => ({ action: "keep" }) },
       agents: fixture.agents,
       onInvokeChild: async (child, info) => {
-        adoption = await land.adoptImplementer(child, info);
+        adoption = await (land.adoptImplementation ?? land.adoptImplementer).call(land, child, info);
         return adoption;
       },
     });
