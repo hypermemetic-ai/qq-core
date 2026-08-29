@@ -144,6 +144,32 @@ HMR watches exactly the linked package roots. Plugins communicate through
 Cordis services, never sibling imports. `QQ_DSH_HAVE_RELAY` follows the
 in-process plugin at `../qq-relay`.
 
+### Agent tool surface
+
+Stock QQ agents are model-toolless by default. `qq-core` owns one replaceable
+allow-list for each agent and applies the empty list on create and resume. It
+also removes matching `tool:*` prompt sections, standing agent-instructions,
+and unsolicited runtime-context snapshots. DSH tool plugins—including jobs,
+filesystem tools, and skill—remain loaded in the host; hiding their inherited
+schemas does not unload or special-case those plugins. Agent-scoped tools
+registered by a workflow or a turn-scoped grant remain available.
+
+A plugin opts an agent into inherited tools through the existing Cordis
+service. The `qq-core.surface.allow` method replaces core's effect; plugins do
+not import a sibling module or stack another `tools.restrict()` mask:
+
+```js
+const qq = ctx.get("qq-core");
+qq.surface.allow(agent, ["bash"]); // replaces qq-core's [] for this agent
+```
+
+The `skill` tool remains hidden unless that session's catalog contains a
+model-invocable skill. Projects, home, and project chairs otherwise share the
+same empty stock surface and can receive inherited tools through
+`qq.surface.allow`. Workflow-specific chair allow-lists belong in the workflow
+plugin; until it calls `qq.surface.allow`, its agents intentionally retain the
+empty stock surface.
+
 Every operator project is an immediate-child repository under `projectsRoot`.
 Its `SessionHeader.cwd` is that repository root, so source files and the
 repository's own `.git` are inside the existing `workspace-write` root.

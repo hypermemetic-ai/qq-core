@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createAgentSurface } from "./agent-surface.mjs";
 import { makeAgentRow, orderAgents } from "./agent-catalog.mjs";
 import { createAliasBook, defaultAliasFile, defaultLegacyAliasFile } from "./alias.mjs";
 import { applyConversationEvent, deriveToolEventViews, projectConversation } from "./conversation.mjs";
@@ -27,6 +28,7 @@ const PROJECTS_ALIAS = "projects";
 export const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq-core/agent-handle");
 const CORDIS_ORIGINAL = Symbol.for("cordis.original");
 const DELEGATE_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/delegate-create-guard");
+const AGENT_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/agent-create-guard");
 
 export function adoptAgentHandle(handle) {
   const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
@@ -52,7 +54,11 @@ function wrapDelegateAgentCreate(value, transform) {
   const agents = unwrapAgents(value);
   if (!agents || typeof agents.create !== "function") return;
   const installed = agents[DELEGATE_CREATE_GUARD];
-  if (installed?.wrapped === agents.create) {
+  // Reuse whenever the guard exists. wrapAgentCreate overwrites agents.create
+  // with rememberHandle, so `wrapped === create` fails on the next plugin apply
+  // even while this transform is still in the chain. Stacking would compose
+  // another setup() and leave a stale restrict() mask on later agents.
+  if (installed) {
     installed.transform = transform;
     return;
   }
@@ -65,6 +71,28 @@ function wrapDelegateAgentCreate(value, transform) {
   agents.create = wrapped;
   Object.defineProperty(agents, DELEGATE_CREATE_GUARD, {
     value: Object.assign(state, { wrapped }),
+    configurable: true,
+  });
+}
+
+function wrapAgentCreate(target, remember) {
+  if (!target) return;
+  const installed = target[AGENT_CREATE_GUARD];
+  if (installed) {
+    installed.remember = remember;
+    return;
+  }
+  const state = { remember };
+  if (typeof target.create === "function") {
+    const create = target.create.bind(target);
+    target.create = async (options) => state.remember(await create(options));
+  }
+  if (typeof target.resume === "function") {
+    const resume = target.resume.bind(target);
+    target.resume = async (options) => state.remember(await resume(options));
+  }
+  Object.defineProperty(target, AGENT_CREATE_GUARD, {
+    value: state,
     configurable: true,
   });
 }
@@ -135,8 +163,15 @@ function selectionSetup(selection) {
   };
 }
 
-function homeSetup(selection) {
-  return selectionSetup(selection);
+function composeSetup(surface, setup) {
+  return (agentCtx) => {
+    surface?.setup(agentCtx);
+    return setup?.(agentCtx);
+  };
+}
+
+function homeSetup(selection, surface) {
+  return composeSetup(surface, selectionSetup(selection));
 }
 
 function httpError(status, message, code) {
@@ -721,6 +756,7 @@ export function createQqService(ctx, config) {
   if (!agents || !sessions || !persistence) {
     throw new Error("qq: required DSH services are unavailable");
   }
+  const surface = createAgentSurface(ctx);
 
   const agentPromises = new Map();
   const handles = new Map();
@@ -822,14 +858,16 @@ export function createQqService(ctx, config) {
     return canonicalCwd(cwd);
   }
 
-  wrapDelegateAgentCreate(agents, (options) => {
-    const meta = options?.meta;
+  wrapDelegateAgentCreate(agents, (options = {}) => {
+    const meta = options.meta;
     const child = meta?.origin === CHILD_ORIGIN
       || (meta?.parentSession !== undefined && meta?.parentSession !== null);
-    if (!child || !samePath(meta?.cwd, projectsRoot)) return options;
+    const transformed = child && samePath(meta?.cwd, projectsRoot)
+      ? { ...options, meta: { ...meta, cwd: gitRootForDelegate(projectsRoot) } }
+      : options;
     return {
-      ...options,
-      meta: { ...meta, cwd: gitRootForDelegate(projectsRoot) },
+      ...transformed,
+      setup: composeSetup(surface, transformed.setup),
     };
   });
 
@@ -954,20 +992,7 @@ export function createQqService(ctx, config) {
     return handle;
   }
 
-  const wrappedCreates = new WeakSet();
-  function wrapAgentCreate(target) {
-    if (!target || wrappedCreates.has(target)) return;
-    if (typeof target.create === "function") {
-      const create = target.create.bind(target);
-      target.create = async (options) => rememberHandle(await create(options));
-    }
-    if (typeof target.resume === "function") {
-      const resume = target.resume.bind(target);
-      target.resume = async (options) => rememberHandle(await resume(options));
-    }
-    wrappedCreates.add(target);
-  }
-  wrapAgentCreate(agents);
+  wrapAgentCreate(agents, rememberHandle);
 
   for (const agent of liveAgents()) {
     const handle = agent?.[AGENT_HANDLE];
@@ -1239,13 +1264,8 @@ export function createQqService(ctx, config) {
     return next;
   }
 
-  async function resumeChair(sessionId, header) {
-    const cwd = header?.cwd;
-    const isProjects = samePath(cwd, projectsRoot);
-    const project = projectForCwd(cwd);
-    const setup = isProjects || project
-      ? selectionSetup({ current: selectedModel })
-      : homeSetup({ current: selectedModel });
+  async function resumeChair(sessionId) {
+    const setup = homeSetup({ current: selectedModel }, surface);
     const handle = rememberHandle(await agents.resume({
       resumeSessionId: sessionId,
       agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
@@ -1312,7 +1332,7 @@ export function createQqService(ctx, config) {
       } else {
         const headers = await persistedHeaders();
         const persisted = headers.find((header) => header.id === defaultSessionId);
-        const setup = selectionSetup({ current: selectedModel });
+        const setup = homeSetup({ current: selectedModel }, surface);
         const options = {
           agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
           setup,
@@ -1636,7 +1656,7 @@ export function createQqService(ctx, config) {
       : project.cwd;
     await ctx.get("loader")?.await();
     const sessionId = `session-${randomUUID()}`;
-    const setup = selectionSetup({ current: selectedModel });
+    const setup = homeSetup({ current: selectedModel }, surface);
     const handle = rememberHandle(await agents.create({
       sessionId,
       meta: { cwd },
@@ -1673,7 +1693,7 @@ export function createQqService(ctx, config) {
     try {
       cwd = scratch.create(sessionId);
       scratch.verify(sessionId);
-      const setup = selectionSetup({ current: selectedModel });
+      const setup = homeSetup({ current: selectedModel }, surface);
       handle = rememberHandle(await agents.create({
         sessionId,
         meta: { cwd },
@@ -1734,7 +1754,7 @@ export function createQqService(ctx, config) {
         sessionId,
         meta: { cwd: projectsRoot },
         agentOptions: { provider: selectedModel.provider, model: selectedModel.model },
-        setup: selectionSetup({ current: selectedModel }),
+        setup: homeSetup({ current: selectedModel }, surface),
       }));
       await sessions.flush(handle.agent.session);
     } catch (error) {
@@ -2156,6 +2176,7 @@ export function createQqService(ctx, config) {
     },
     alias: liveAlias,
     resolve: resolveAlias,
+    surface,
     async create(projectName, folderName) {
       const project = projectByName(projectName ?? defaultProject);
       let folderCwd;

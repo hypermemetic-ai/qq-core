@@ -3,6 +3,15 @@ set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 parts=$(cd -- "$root/.." && pwd -P)
+# A per-repository git worktree is not beside the other QQ repositories. Match
+# the JS fixtures: when origin is a local primary checkout, use its siblings.
+if [[ ! -d $parts/qq-ui ]]; then
+  origin=$(git -C "$root" remote get-url origin 2>/dev/null || true)
+  if [[ $origin == /* && -d $origin ]]; then
+    candidate=$(cd -- "$origin/.." && pwd -P)
+    if [[ -d $candidate/qq-ui ]]; then parts=$candidate; fi
+  fi
+fi
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/qq-core-host-boot.XXXXXX")
 projects="$scratch/projects"
 sim="$projects/qq-core"
