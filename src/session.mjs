@@ -15,6 +15,7 @@ import { createScratchManager, defaultScratchRoot } from "./scratch.mjs";
 import { createSessionScopeStore, defaultScopeFile } from "./session-scope.mjs";
 
 const SESSION_ID = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_OBSERVE_MS = 100;
 const RUNNING_CLEAR = "clear is unavailable while this session is running";
 const RUNNING_CLOSE = "close is unavailable while this session is running";
@@ -118,12 +119,15 @@ function freeze(value) {
   return value;
 }
 
-function userMessage(text) {
+function userMessage(text, clientMessageId) {
   return freeze({
     id: randomUUID(),
     role: "user",
     content: [{ type: "text", text }],
-    source: { kind: "user" },
+    source: {
+      kind: "user",
+      ...(clientMessageId === undefined ? {} : { clientMessageId }),
+    },
   });
 }
 
@@ -179,6 +183,15 @@ function httpError(status, message, code) {
   error.status = status;
   if (code) error.code = code;
   return error;
+}
+
+function promptClientMessageId(options) {
+  const value = options?.clientMessageId;
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !UUID.test(value)) {
+    throw httpError(400, "qq: clientMessageId must be a UUID");
+  }
+  return value;
 }
 
 async function waitForIdle(agent, currentAgent = () => agent) {
@@ -2194,7 +2207,8 @@ export function createQqService(ctx, config) {
     reopen,
     resume: reopen,
     scratchRoot: scratch.root,
-    async prompt(sessionId, text) {
+    async prompt(sessionId, text, options = undefined) {
+      const clientMessageId = promptClientMessageId(options);
       await boot;
       const agent = await liveChairAgent(sessionId);
       const line = String(text ?? "");
@@ -2266,7 +2280,7 @@ export function createQqService(ctx, config) {
         }
         return typeof result?.text === "string" ? result.text : "";
       }
-      const message = userMessage(line);
+      const message = userMessage(line, clientMessageId);
       const mode = agent.status === "running" ? "steer" : "followup";
       const directUserTime = clock();
       notifyDirectUserMessage({ kind: "admitted", agent, message, mode, time: directUserTime });

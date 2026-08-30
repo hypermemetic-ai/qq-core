@@ -28,6 +28,11 @@ function editableMessage(message) {
   return blocks.length > 0 && blocks.every((block) => block?.type === "text");
 }
 
+function clientCorrelation(message) {
+  const clientMessageId = message?.source?.clientMessageId;
+  return typeof clientMessageId === "string" ? { clientMessageId } : {};
+}
+
 function normalizedAssistantBlock(block) {
   if (!block || typeof block !== "object") return undefined;
   if (block.type === "text") {
@@ -96,6 +101,7 @@ export function pendingFromInbox(inbox, nodes) {
         target,
         placement: target === "next-step" ? "steering" : "queued",
         message,
+        ...clientCorrelation(message),
         text: messageText(message).slice(0, TEXT_LIMIT),
         editable: editableMessage(message),
       });
@@ -182,6 +188,7 @@ export function applyUserMessage(conversation, event) {
           time: event.time,
           messageId: String(message?.id ?? ""),
           content: asArray(message?.content),
+          ...clientCorrelation(message),
         }
       : {
           kind: "context",
@@ -216,6 +223,7 @@ export function applyUserMessage(conversation, event) {
       seq: event.seq,
       time: event.time,
       content: asArray(message?.content),
+      ...clientCorrelation(message),
       claimed: false,
       durable: true,
     };
@@ -228,6 +236,7 @@ export function applyUserMessage(conversation, event) {
     time: event.time,
     messageId: id,
     content: asArray(message?.content),
+    ...clientCorrelation(message),
   });
   return { nodes, pending };
 }
@@ -726,6 +735,7 @@ export function projectConversation(events, options = {}) {
       turn,
       messageId: String(message.id ?? ""),
       content: asArray(message.content),
+      ...clientCorrelation(message),
       claimed: true,
     });
     const id = String(message.id ?? "");
@@ -874,6 +884,7 @@ export function projectConversation(events, options = {}) {
             time: event.time,
             messageId: String(message?.id ?? ""),
             content: asArray(message?.content),
+            ...clientCorrelation(message),
           });
           break;
         }
@@ -897,6 +908,7 @@ export function projectConversation(events, options = {}) {
             time: event.time,
             turn: openTurn,
             content: asArray(message?.content),
+            ...clientCorrelation(message),
             claimed: false,
             durable: true,
           });
@@ -909,6 +921,7 @@ export function projectConversation(events, options = {}) {
           time: event.time,
           messageId: String(message?.id ?? ""),
           content: asArray(message?.content),
+          ...clientCorrelation(message),
         });
         break;
       }
