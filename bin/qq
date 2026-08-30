@@ -86,7 +86,7 @@ add_named_sibling() {
   fi
 }
 add_named_sibling qq-ui '@hypermemetic-ai/qq-ui' QQ_DSH_HAVE_UI
-add_named_sibling qq-wiki '@hypermemetic-ai/qq-index' QQ_DSH_HAVE_INDEX
+add_named_sibling qq-index '@hypermemetic-ai/qq-index' QQ_DSH_HAVE_INDEX
 add_named_sibling qq-dashboard '@hypermemetic-ai/qq-dashboard' QQ_DSH_HAVE_DASHBOARD
 add_named_sibling qq-workflows '@hypermemetic-ai/qq-workflows' QQ_DSH_HAVE_WORKFLOWS
 add_named_sibling qq-models '@hypermemetic-ai/qq-models'

@@ -7,11 +7,10 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createQqService } from "../src/session.mjs";
@@ -22,9 +21,16 @@ function siblingProject(name) {
   const envName = `QQ_${name.replace(/^qq-/, "").toUpperCase().replaceAll("-", "_")}_ROOT`;
   const configured = process.env[envName];
   const candidates = [configured, join(dirname(packageRoot), name)];
+  for (let cursor = packageRoot; dirname(cursor) !== cursor; cursor = dirname(cursor)) {
+    if (basename(cursor) === ".qq-worktrees") {
+      candidates.push(join(dirname(cursor), name));
+      break;
+    }
+  }
   try {
     const origin = execFileSync("git", ["-C", packageRoot, "remote", "get-url", "origin"], {
       encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     if (origin.startsWith("/")) candidates.push(join(dirname(realpathSync(origin)), name));
   } catch {
@@ -124,6 +130,16 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
       get(name) {
         if (name === "tools") return tools;
         if (name === "systemPrompt") return systemPrompt;
+        if (name === "sandboxPolicy") {
+          return {
+            resolve({ session }) {
+              const mode = session.events.findLast(({ type }) => type === "sandbox/mode")?.data?.mode;
+              return { mode, workspaceRoot: session.header.cwd };
+            },
+          };
+        }
+        if (name === "shell") return { sandboxMode: "fixture" };
+        if (name === "sandbox") return { confine: () => ({ enforcement: "full" }) };
         return ctx.get(name);
       },
       on(type, listener) {
@@ -146,6 +162,10 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
         header: { ...header(id, meta.cwd), ...meta },
         events: [],
         seq: 0,
+        append(type, data) {
+          this.seq += 1;
+          this.events.push({ type, data, seq: this.seq });
+        },
       },
       cancel() {},
       followup(message) {
@@ -455,16 +475,19 @@ async function replacement(command, action) {
     const gitRoot = realpathSync(fixture.service.gitRootForDelegate(fixture.service.projectsRoot));
     assert.notEqual(childCwd, realpathSync(fixture.service.projectsRoot));
     assert.notEqual(childCwd, gitRoot, "delegate must use an isolated capsule, not the primary checkout");
-    assert.equal(
-      execFileSync("git", ["-C", childCwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(),
-      childCwd,
-    );
-    assert.ok(statSync(join(childCwd, ".git")).isDirectory(), "capsule must own an internal .git directory");
+    assert.equal(existsSync(join(childCwd, ".git")), false, "delegate workspace must not expose Git metadata");
     assert.equal(adoption?.status, "ok", adoption?.reason);
     assert.doesNotMatch(adoption?.reason ?? "", /not a git worktree/i);
     assert.equal(adoption?.owned, true);
     assert.deepEqual(land.ownedChildren(), [delegated.child]);
-    assert.equal(realpathSync(land.bySession(delegated.child).worktree), childCwd);
+    const delegation = land.bySession(delegated.child);
+    assert.equal(realpathSync(delegation.workspace), childCwd);
+    const retainedWorktree = realpathSync(delegation.worktree);
+    assert.notEqual(retainedWorktree, childCwd, "host Git capsule must stay outside the child workspace");
+    assert.equal(
+      execFileSync("git", ["-C", retainedWorktree, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(),
+      retainedWorktree,
+    );
     assertProjectsDefaultSurface(fixture, projects.id);
     assertNotProjectsFenced(fixture, delegated.child);
   } finally {

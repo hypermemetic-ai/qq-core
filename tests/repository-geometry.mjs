@@ -28,17 +28,26 @@ assert.match(read("src/session-persistence.mjs"), /Symbol\.for\("@hypermemetic-a
 const catalog = JSON.parse(read("project-catalog.json"));
 assert.equal(catalog.projects.some(({ name }) => name === "qq"), false, "qq must not be a catalog group");
 const catalogText = JSON.stringify(catalog);
+assert.deepEqual(
+  catalog.projects.find(({ name }) => name === "qq-index"),
+  {
+    name: "qq-index",
+    label: "qq-index",
+    folders: [{ name: "qq-index", label: "qq-index", path: "qq-index" }],
+  },
+  "index project and chair must use the canonical repository path",
+);
 for (const retired of ["tasks", "dsh-relay", "dsh-dictation"]) {
   assert.equal(catalogText.includes(retired), false, `catalog still contains ${retired}`);
 }
 
 const launcher = read("bin/qq");
-for (const sibling of ["qq-ui", "qq-dashboard", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
+for (const sibling of ["qq-ui", "qq-index", "qq-dashboard", "qq-workflows", "qq-models", "qq-relay", "qq-dictation"]) {
   assert.match(launcher, new RegExp(`add_named_sibling ${sibling.replace("-", "\\-")}`));
 }
 assert.match(
   launcher,
-  /add_named_sibling qq-wiki '@hypermemetic-ai\/qq-index' QQ_DSH_HAVE_INDEX/,
+  /add_named_sibling qq-index '@hypermemetic-ai\/qq-index' QQ_DSH_HAVE_INDEX/,
 );
 assert.match(launcher, /export .*QQ_DSH_HAVE_INDEX=0/);
 assert.match(
@@ -46,7 +55,7 @@ assert.match(
   /add_named_sibling qq-dashboard '@hypermemetic-ai\/qq-dashboard' QQ_DSH_HAVE_DASHBOARD/,
 );
 assert.match(launcher, /export .*QQ_DSH_HAVE_DASHBOARD=0/);
-assert.equal(launcher.match(/add_named_sibling qq-wiki/g)?.length, 1);
+assert.equal(launcher.match(/add_named_sibling qq-index/g)?.length, 1);
 assert.equal(launcher.match(/add_named_sibling qq-dashboard/g)?.length, 1);
 const managedPackages = launcher.slice(launcher.indexOf("const managed = new Set(["));
 assert.match(managedPackages, /"@hypermemetic-ai\/qq-index"/);
@@ -76,7 +85,6 @@ assert.ok(
   hostOrder.every((offset, index) => offset >= 0 && (index === 0 || hostOrder[index - 1] < offset)),
   "host order must be core -> index -> workflows -> dashboard -> ui",
 );
-assert.doesNotMatch(patch, /qq-wiki/);
 assert.doesNotMatch(patch, /- id: qq\n|name: '@hypermemetic-ai\/qq'|inject: \[qq, webServer\]/);
 assert.doesNotMatch(patch, /qq-tasks|dsh-relay|dsh-dictation/);
 assert.match(read("systemd/user/qq.service"), /WorkingDirectory=%h\/projects\/qq-core/);
@@ -84,16 +92,16 @@ assert.match(read("systemd/user/qq.service"), /ExecStart=%h\/projects\/qq-core\/
 const readme = read("README.md");
 assert.match(readme, /`@hypermemetic-ai\/qq-index`/);
 assert.match(readme, /`QQ_DSH_HAVE_INDEX`.*optional `qq-index` plugin/);
-assert.match(readme, /checkout-directory argument `qq-wiki` is temporary/);
+assert.match(readme, /canonical sibling checkout `qq-index` only when its package identity is exactly/);
 assert.match(readme, /package main `src\/plugin\.mjs` provides only the `qq-index` service with\n`\{ loadIndex, validateIndex \}`/);
 assert.match(readme, /`@hypermemetic-ai\/qq-dashboard`/);
 assert.match(readme, /`QQ_DSH_HAVE_DASHBOARD` gates the optional\n`qq-dashboard` plugin/);
 assert.match(readme, /`src\/plugin\.mjs` requires `qq-core` and provides\nthe canonical `qq-dashboard` service/);
-assert.match(readme, /Neither sibling\nhas a compatibility alias/);
+assert.match(readme, /Neither sibling has a compatibility alias/);
 for (const source of readdirSync(join(packageRoot, "src")).filter((name) => name.endsWith(".mjs"))) {
   assert.doesNotMatch(
     read(`src/${source}`),
-    /@hypermemetic-ai\/(?:qq-index|qq-dashboard)|qq-wiki/,
+    /@hypermemetic-ai\/(?:qq-index|qq-dashboard)/,
   );
 }
 
