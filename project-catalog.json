@@ -62,13 +62,13 @@
       ]
     },
     {
-      "name": "qq-wiki",
-      "label": "qq-wiki",
+      "name": "qq-index",
+      "label": "qq-index",
       "folders": [
         {
-          "name": "qq-wiki",
-          "label": "qq-wiki",
-          "path": "qq-wiki"
+          "name": "qq-index",
+          "label": "qq-index",
+          "path": "qq-index"
         }
       ]
     },

@@ -31,6 +31,22 @@ It runs the repository geometry, agent surface, projects chair, and host boot ch
 
 [`src/session.mjs`](src/session.mjs) has the highest change heat and relative-module fan-in in the supplied repository evidence, so treat session changes as broad-impact until the tests establish otherwise.
 
+## Optional host siblings
+
+[`bin/qq`](bin/qq) admits the canonical sibling checkout `qq-index` only when its package identity is exactly
+`@hypermemetic-ai/qq-index`. A missing checkout or identity mismatch is nonfatal.
+`QQ_DSH_HAVE_INDEX` gates the optional `qq-index` plugin; its package main `src/plugin.mjs` provides only the `qq-index` service with
+`{ loadIndex, validateIndex }`. The project catalog uses the same `qq-index` folder and path.
+
+The launcher likewise admits `@hypermemetic-ai/qq-dashboard` only from the
+`qq-dashboard` sibling. `QQ_DSH_HAVE_DASHBOARD` gates the optional
+`qq-dashboard` plugin. Its `src/plugin.mjs` requires `qq-core` and provides
+the canonical `qq-dashboard` service; `qq-ui` retains a fallback when it is absent.
+
+Admitted siblings flow through the launcher's shared profile-link and HMR-root
+reconciliation. Plugins communicate through host services rather than direct
+sibling imports. Neither sibling has a compatibility alias.
+
 ## More detail
 
 - [`dsh/README.md`](dsh/README.md)

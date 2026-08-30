@@ -4,7 +4,19 @@ set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 parts=$(cd -- "$root/.." && pwd -P)
 # A per-repository git worktree is not beside the other QQ repositories. Match
-# the JS fixtures: when origin is a local primary checkout, use its siblings.
+# the JS fixtures: first recover the primary projects root from worktree geometry,
+# then use a local origin when Git metadata is available.
+if [[ ! -d $parts/qq-ui ]]; then
+  candidate=$root
+  while [[ $candidate != / && ${candidate##*/} != .qq-worktrees ]]; do
+    candidate=${candidate%/*}
+    [[ -n $candidate ]] || candidate=/
+  done
+  if [[ ${candidate##*/} == .qq-worktrees ]]; then
+    candidate=${candidate%/*}
+    if [[ -d $candidate/qq-ui ]]; then parts=$candidate; fi
+  fi
+fi
 if [[ ! -d $parts/qq-ui ]]; then
   origin=$(git -C "$root" remote get-url origin 2>/dev/null || true)
   if [[ $origin == /* && -d $origin ]]; then
@@ -28,6 +40,12 @@ cp "$root/package.json" "$root/host.patch.yml" "$root/project-catalog.json" "$si
 ln -s "$root/src" "$sim/src"
 mkdir -p "$sim/dsh"
 cp "$root/dsh/package.json" "$root/dsh/package-lock.json" "$root/dsh/qq-dsh-model-compat.mjs" "$sim/dsh/"
+for installed_toolchain in "$root/dsh/node_modules" "$parts/qq-core/dsh/node_modules"; do
+  if [[ -x $installed_toolchain/.bin/dsh ]]; then
+    ln -s "$installed_toolchain" "$sim/dsh/node_modules"
+    break
+  fi
+done
 
 port=$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
 stop_host() {
@@ -83,8 +101,8 @@ for (const name of Object.keys(deps)) {
 NODE
 stop_host
 
-mkdir -p "$projects/qq-wiki" "$projects/qq-dashboard"
-cat >"$projects/qq-wiki/package.json" <<'JSON'
+mkdir -p "$projects/qq-index" "$projects/qq-dashboard"
+cat >"$projects/qq-index/package.json" <<'JSON'
 {
   "name": "@hypermemetic-ai/not-qq-index",
   "version": "0.0.0",
@@ -108,7 +126,7 @@ tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
 grep -Fxq 'QQ_DSH_HAVE_INDEX=0' "$host_env"
 grep -Fxq 'QQ_DSH_HAVE_DASHBOARD=0' "$host_env"
 grep -Fxq "QQ_DSH_HMR_ROOTS=$sim" "$host_env"
-grep -Fq "qq: ignoring sibling $projects/qq-wiki with unexpected package identity" "$scratch/identity-mismatch.err"
+grep -Fq "qq: ignoring sibling $projects/qq-index with unexpected package identity" "$scratch/identity-mismatch.err"
 grep -Fq "qq: ignoring sibling $projects/qq-dashboard with unexpected package identity" "$scratch/identity-mismatch.err"
 node - "$scratch/identity-mismatch-state/profiles/qq/package.json" <<'NODE'
 const { readFileSync } = require("node:fs");
@@ -120,12 +138,12 @@ for (const name of ["qq-index", "qq-dashboard"]) {
 }
 NODE
 stop_host
-rm -rf -- "$projects/qq-wiki" "$projects/qq-dashboard"
+rm -rf -- "$projects/qq-index" "$projects/qq-dashboard"
 
 for name in qq-ui qq-workflows qq-models qq-relay qq-dictation; do
   ln -s "$parts/$name" "$projects/$name"
 done
-node - "$parts/qq-wiki/package.json" "$parts/qq-dashboard/package.json" <<'NODE'
+node - "$parts/qq-index/package.json" "$parts/qq-dashboard/package.json" <<'NODE'
 const { readFileSync } = require("node:fs");
 const index = JSON.parse(readFileSync(process.argv[2], "utf8"));
 if (index.name !== "@hypermemetic-ai/qq-index") throw new Error(`unexpected index package: ${index.name}`);
@@ -136,9 +154,9 @@ if (dashboard.name !== "@hypermemetic-ai/qq-dashboard") {
 }
 if (dashboard.main !== "src/plugin.mjs") throw new Error(`unexpected dashboard main: ${dashboard.main}`);
 NODE
-ln -s "$parts/qq-wiki" "$projects/qq-wiki"
+ln -s "$parts/qq-index" "$projects/qq-index"
 ln -s "$parts/qq-dashboard" "$projects/qq-dashboard"
-index_root=$(cd -- "$parts/qq-wiki" && pwd -P)
+index_root=$(cd -- "$parts/qq-index" && pwd -P)
 dashboard_root=$(cd -- "$parts/qq-dashboard" && pwd -P)
 boot all-parts
 host_env="$scratch/all-parts.env"
@@ -173,7 +191,7 @@ if (!["link:", "file:"].some((prefix) => deps["@hypermemetic-ai/qq-core"] === `$
 }
 const siblings = [
   ["qq-ui", "@hypermemetic-ai/qq-ui"],
-  ["qq-wiki", "@hypermemetic-ai/qq-index"],
+  ["qq-index", "@hypermemetic-ai/qq-index"],
   ["qq-dashboard", "@hypermemetic-ai/qq-dashboard"],
   ["qq-workflows", "@hypermemetic-ai/qq-workflows"],
   ["qq-models", "@hypermemetic-ai/qq-models"],
