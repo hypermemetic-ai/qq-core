@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { projectConversation } from "../src/conversation.mjs";
 import { createQqService } from "../src/session.mjs";
 
 const packageRoot = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
@@ -643,6 +644,145 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
   } finally {
     fixture.cleanup();
   }
+}
+
+const CLIENT_MESSAGE_ID = "123e4567-e89b-42d3-a456-426614174000";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+{
+  const fixture = makeFixture();
+  try {
+    await fixture.service.createProjects();
+    const result = await fixture.service.prompt(OLD_PROJECTS_ID, "correlated prompt", {
+      clientMessageId: CLIENT_MESSAGE_ID,
+    });
+    const message = fixture.agents.get(OLD_PROJECTS_ID).inbox.nextTurn.at(-1);
+    assert.equal(result.kind, "accepted");
+    assert.equal(result.mode, "followup");
+    assert.equal(result.messageId, message.id);
+    assert.match(message.id, UUID_PATTERN);
+    assert.notEqual(message.id, CLIENT_MESSAGE_ID);
+    assert.deepEqual(message.source, { kind: "user", clientMessageId: CLIENT_MESSAGE_ID });
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+{
+  const fixture = makeFixture();
+  try {
+    await fixture.service.createProjects();
+    const result = await fixture.service.prompt(OLD_PROJECTS_ID, "uncorrelated prompt");
+    const message = fixture.agents.get(OLD_PROJECTS_ID).inbox.nextTurn.at(-1);
+    assert.equal(result.messageId, message.id);
+    assert.deepEqual(message.source, { kind: "user" });
+    assert.equal(Object.hasOwn(message.source, "clientMessageId"), false);
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+{
+  const fixture = makeFixture();
+  try {
+    await fixture.service.createProjects();
+    for (const clientMessageId of [
+      "",
+      "not-a-uuid",
+      42,
+      null,
+      "00000000-0000-0000-0000-000000000000",
+      "123e4567-e89b-42d3-c456-426614174000",
+    ]) {
+      await assert.rejects(
+        fixture.service.prompt(OLD_PROJECTS_ID, "rejected prompt", { clientMessageId }),
+        (error) => error?.status === 400 && /clientMessageId must be a UUID/.test(error.message),
+      );
+    }
+    assert.deepEqual(fixture.agents.get(OLD_PROJECTS_ID).inbox.nextTurn, []);
+    assert.deepEqual(fixture.agents.get(OLD_PROJECTS_ID).inbox.nextStep, []);
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+function correlatedMessage(id, clientMessageId) {
+  const correlation = arguments.length < 2 ? CLIENT_MESSAGE_ID : clientMessageId;
+  return {
+    id,
+    role: "user",
+    content: [{ type: "text", text: id }],
+    source: {
+      kind: "user",
+      ...(correlation === undefined ? {} : { clientMessageId: correlation }),
+    },
+  };
+}
+
+function inboxProjection(target, message, state) {
+  const events = [{
+    type: "agent/inbox/spliced",
+    seq: 1,
+    time: 1,
+    data: { target, start: 0, removedCount: 0, inserted: [message] },
+  }];
+  if (state === "pending") return projectConversation(events);
+  events.push({
+    type: "agent/inbox/spliced",
+    seq: 2,
+    time: 2,
+    data: { target, start: 0, removedCount: 1, inserted: [] },
+  });
+  if (state === "claimed") return projectConversation(events);
+  events.push({
+    type: "user/message",
+    seq: 3,
+    time: 3,
+    surfaceOp: "append",
+    data: message,
+  });
+  return projectConversation(events);
+}
+
+for (const target of ["next-turn", "next-step"]) {
+  const message = correlatedMessage(`authoritative-${target}`);
+  const kind = target === "next-step" ? "steering" : "user";
+  const placement = target === "next-step" ? "steering" : "queued";
+
+  const pending = inboxProjection(target, message, "pending");
+  assert.equal(pending.nodes.length, 0);
+  assert.equal(pending.pending.length, 1);
+  assert.equal(pending.pending[0].id, message.id);
+  assert.equal(pending.pending[0].target, target);
+  assert.equal(pending.pending[0].placement, placement);
+  assert.equal(pending.pending[0].clientMessageId, CLIENT_MESSAGE_ID);
+
+  const claimed = inboxProjection(target, message, "claimed");
+  assert.equal(claimed.pending.length, 0);
+  assert.equal(claimed.nodes.length, 1);
+  assert.equal(claimed.nodes[0].kind, kind);
+  assert.equal(claimed.nodes[0].messageId, message.id);
+  assert.equal(claimed.nodes[0].clientMessageId, CLIENT_MESSAGE_ID);
+  assert.equal(claimed.nodes[0].claimed, true);
+
+  const durable = inboxProjection(target, message, "durable");
+  assert.equal(durable.pending.length, 0);
+  assert.equal(durable.nodes.length, 1);
+  assert.equal(durable.nodes[0].kind, kind);
+  assert.equal(durable.nodes[0].messageId, message.id);
+  assert.equal(durable.nodes[0].clientMessageId, CLIENT_MESSAGE_ID);
+  assert.equal(durable.nodes[0].claimed, false);
+  assert.equal(durable.nodes[0].durable, true);
+}
+
+{
+  const message = correlatedMessage("authoritative-without-correlation", undefined);
+  const pending = inboxProjection("next-turn", message, "pending").pending[0];
+  const claimed = inboxProjection("next-turn", message, "claimed").nodes[0];
+  const durable = inboxProjection("next-turn", message, "durable").nodes[0];
+  assert.equal(Object.hasOwn(pending, "clientMessageId"), false);
+  assert.equal(Object.hasOwn(claimed, "clientMessageId"), false);
+  assert.equal(Object.hasOwn(durable, "clientMessageId"), false);
 }
 
 console.log("qq-core reserved Projects chair: ok");
