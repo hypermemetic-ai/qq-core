@@ -1850,30 +1850,57 @@ export function createQqService(ctx, config) {
     return descendants;
   }
 
-  async function disposeDescendants(sessionId) {
+  async function disposeDescendants(sessionId, options = {}) {
     for (const descendant of liveDescendants(sessionId)) {
-      if (agents.get(descendant.id)) await disposeLive(descendant.id);
+      if (agents.get(descendant.id)) await disposeLive(descendant.id, options);
     }
   }
 
-  async function disposeLive(sessionId) {
+  function detachLiveAgentNow(sessionId, agent) {
+    const registry = unwrapAgents(agents);
+    const entry = registry?.store?.get?.(sessionId);
+    if (entry?.agent === agent && typeof registry.detachEntered === "function") {
+      registry.detachEntered(entry);
+      return true;
+    }
+    if (entry === agent && typeof registry?.store?.delete === "function") {
+      registry.store.delete(sessionId);
+      return true;
+    }
+    if (entry?.agent === agent && typeof registry?.store?.delete === "function") {
+      registry.store.delete(sessionId);
+      return true;
+    }
+    return !agents.get(sessionId);
+  }
+
+  async function disposeLive(sessionId, options = {}) {
     const agent = agents.get(sessionId);
     const handle = handles.get(sessionId) ?? agent?.[AGENT_HANDLE];
+    if (options.force && agent) {
+      try { agent.cancel?.({ kind: "disposed" }); } catch { /* registry detach remains authoritative */ }
+      const disposal = typeof handle?.dispose === "function"
+        ? Promise.resolve().then(() => handle.dispose())
+        : Promise.resolve();
+      if (!detachLiveAgentNow(sessionId, agent)) throw httpError(409, "qq: session is not closeable");
+      void disposal.catch((error) => {
+        ctx.logger?.warn?.(`qq: background session disposal failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      handles.delete(sessionId);
+      agentPromises.delete(sessionId);
+      try { delete agent?.[AGENT_HANDLE]; } catch {}
+      syncLive();
+      persistLiveChairs();
+      if (options.wait !== false) await disposal;
+      return;
+    }
     try {
       if (handle && typeof handle.dispose === "function") {
         await handle.dispose();
       } else if (agent) {
         try { agent.cancel?.({ kind: "disposed" }); } catch { /* idle cancel is fine */ }
         try { await agent.whenIdle?.(); } catch { /* already quiet */ }
-        const registry = unwrapAgents(agents);
-        const entry = registry?.store?.get?.(sessionId);
-        if (entry && typeof registry.detachEntered === "function") {
-          registry.detachEntered(entry);
-        } else if (typeof registry?.store?.delete === "function") {
-          registry.store.delete(sessionId);
-        } else {
-          throw httpError(409, "qq: session is not closeable");
-        }
+        if (!detachLiveAgentNow(sessionId, agent)) throw httpError(409, "qq: session is not closeable");
       } else {
         throw httpError(409, "qq: session is not closeable");
       }
@@ -1905,7 +1932,7 @@ export function createQqService(ctx, config) {
   async function closeProject(sessionId, project) {
     const folderName = project?.grouped ? (project.folder?.name ?? "") : "";
     const remainingBefore = await list(project?.name, folderName);
-    await disposeLive(sessionId);
+    await disposeLive(sessionId, { force: true, wait: false });
     const remaining = remainingBefore.filter((row) => row.id !== sessionId);
     const next = remaining[0];
     return {
@@ -1920,7 +1947,7 @@ export function createQqService(ctx, config) {
 
   async function closeHome(sessionId, classified) {
     const remainingBefore = await listHome();
-    await disposeLive(sessionId);
+    await disposeLive(sessionId, { force: true, wait: false });
     try {
       scratch.delete(sessionId);
     } catch (error) {
@@ -1942,10 +1969,9 @@ export function createQqService(ctx, config) {
       if (!SESSION_ID.test(sessionId)) throw httpError(404, NOT_FOUND);
       const agent = agents.get(sessionId);
       if (!agent) throw httpError(404, NOT_FOUND);
-      if (agent.status === "running") throw httpError(409, RUNNING_CLOSE);
       const classified = classifyAgent(agent);
       if (classified?.scope !== "home") throw httpError(404, NOT_FOUND);
-      await disposeDescendants(sessionId);
+      await disposeDescendants(sessionId, { force: true, wait: false });
       return closeHome(sessionId, classified);
     }
     const agent = await liveAgent(sessionId);
@@ -1953,7 +1979,7 @@ export function createQqService(ctx, config) {
     if (child) {
       const parent = agents.get(child.parent);
       const parentRow = parent ? rowFor(parent) : undefined;
-      await disposeLive(sessionId);
+      await disposeLive(sessionId, { force: true, wait: false });
       return {
         id: child.parent,
         closed: sessionId,
@@ -1963,12 +1989,11 @@ export function createQqService(ctx, config) {
         ...(parentRow?.folder ? { folder: parentRow.folder } : {}),
       };
     }
-    if (agent.status === "running") throw httpError(409, RUNNING_CLOSE);
     const classified = classifyAgent(agent);
-    if (classified) await disposeDescendants(sessionId);
+    if (classified) await disposeDescendants(sessionId, { force: true, wait: false });
     if (classified?.scope === "home") return closeHome(sessionId, classified);
     if (classified?.scope === "projects") {
-      await disposeLive(sessionId);
+      await disposeLive(sessionId, { force: true, wait: false });
       return {
         id: null,
         closed: sessionId,
@@ -1982,8 +2007,8 @@ export function createQqService(ctx, config) {
   async function replaceProject(sessionId, project) {
     const created = await createAt(project.name, project.cwd);
     try {
-      await disposeDescendants(sessionId);
-      await disposeLive(sessionId);
+      await disposeDescendants(sessionId, { force: true, wait: false });
+      await disposeLive(sessionId, { force: true, wait: false });
     } catch (error) {
       try { await disposeLive(created.id); } catch {}
       throw error;
@@ -2003,8 +2028,8 @@ export function createQqService(ctx, config) {
   async function replaceHome(sessionId) {
     const classified = classifyAgent(agents.get(sessionId));
     const created = await createHome();
-    await disposeDescendants(sessionId);
-    await disposeLive(sessionId);
+    await disposeDescendants(sessionId, { force: true, wait: false });
+    await disposeLive(sessionId, { force: true, wait: false });
     try {
       scratch.delete(sessionId);
     } catch (error) {
@@ -2035,8 +2060,8 @@ export function createQqService(ctx, config) {
       throw error;
     }
     try {
-      await disposeDescendants(sessionId);
-      await disposeLive(sessionId);
+      await disposeDescendants(sessionId, { force: true, wait: false });
+      await disposeLive(sessionId, { force: true, wait: false });
     } catch (error) {
       // Keep replacement transactional if closing the old chair fails: remove
       // the new chair and return the reserved alias to the still-live old one.
@@ -2055,7 +2080,9 @@ export function createQqService(ctx, config) {
   async function replace(sessionId) {
     await boot;
     const agent = await liveAgent(sessionId);
-    if (agent.status === "running") throw httpError(409, RUNNING_CLEAR);
+    if (agent.status === "running") {
+      try { agent.cancel?.({ kind: "disposed" }); } catch { /* replacement still owns final detach */ }
+    }
     const classified = classifyAgent(agent);
     if (classified?.scope === "home") return replaceHome(sessionId);
     if (classified?.scope === "projects") return replaceProjects(sessionId);

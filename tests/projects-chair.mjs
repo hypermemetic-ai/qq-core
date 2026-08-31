@@ -590,14 +590,27 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
     await fixture.service.createProjects();
     fixture.agents.get(OLD_PROJECTS_ID).status = "running";
     const beforeCreates = fixture.createCalls;
-    await assert.rejects(
-      fixture.service.prompt(OLD_PROJECTS_ID, "/clear"),
-      (error) => error?.status === 409 && /clear is unavailable while this session is running/.test(error.message),
-    );
-    assert.equal(fixture.createCalls, beforeCreates);
-    assert.deepEqual(projectsAgents(fixture).map((agent) => agent.session.id), [OLD_PROJECTS_ID]);
-    assert.deepEqual(persistedProjectsRows(fixture).map((row) => row.id), [OLD_PROJECTS_ID]);
-    assert.equal(projectsAliasHolder(fixture), OLD_PROJECTS_ID);
+    const cleared = await fixture.service.prompt(OLD_PROJECTS_ID, "/clear");
+    assert.equal(cleared.action, "replace");
+    assert.notEqual(cleared.id, OLD_PROJECTS_ID);
+    assert.equal(fixture.createCalls, beforeCreates + 1);
+    assert.equal(fixture.agents.get(OLD_PROJECTS_ID), undefined, "running chair detaches synchronously");
+    assert.deepEqual(projectsAgents(fixture).map((agent) => agent.session.id), [cleared.id]);
+    assert.equal(projectsAliasHolder(fixture), cleared.id);
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+{
+  const fixture = makeFixture();
+  try {
+    await fixture.service.createProjects();
+    fixture.agents.get(OLD_PROJECTS_ID).status = "running";
+    const closed = await fixture.service.prompt(OLD_PROJECTS_ID, "/close");
+    assert.equal(closed.action, "close");
+    assert.equal(closed.closed, OLD_PROJECTS_ID);
+    assert.equal(fixture.agents.get(OLD_PROJECTS_ID), undefined, "running chair closes synchronously");
   } finally {
     fixture.cleanup();
   }
