@@ -43,13 +43,15 @@
       - 'cache'
       - 'data'
 
-# DSH owns the authoritative live-preferred history corpus. QQ enables only its
-# disposable FTS read model, lazily, at a dedicated durable path; transcript
-# JSONL remains authoritative and is never written through this index.
+# DSH owns the authoritative live-preferred history corpus and exact-read APIs.
+# Keep its SQLite FTS service available for other authorized host consumers; only
+# qq-core /find-session is cut over to qq-session-index. Transcript JSONL remains
+# authoritative for exact reads and candidate verification.
 - id: session-query-sqlite
   name: '@deepseek-ai/dsh-session-query-sqlite'
   config:
     path: !!js dshHomePath('session-query/session-history.sqlite')
+    # Preserve inherited FTS for unrelated consumers such as qq-workflows.
     openAt: first-search
     readWindowMax: 50
 
@@ -117,6 +119,12 @@
     - id: qq-index
       name: '@hypermemetic-ai/qq-index'
       disabled: !!js process.env.QQ_DSH_HAVE_INDEX !== '1'
+      config:
+        sessionIndex:
+          # A missing sibling or runtime directory leaves the capability inert;
+          # qq-core search then fails closed. The host itself still boots safely.
+          enabled: !!js process.env.QQ_DSH_HAVE_INDEX === '1' && !!process.env.XDG_RUNTIME_DIR
+          socketPath: !!js (process.env.XDG_RUNTIME_DIR ?? '/run/user/' + process.getuid()) + '/qq-index/session-index.sock'
 
     - id: qq-workflows
       name: '@hypermemetic-ai/qq-workflows'

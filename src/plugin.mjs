@@ -13,12 +13,12 @@ export function apply(ctx, config) {
     alias: service.alias,
     resolve: service.resolve,
   }));
-  // DSH intentionally keeps sessionQuery policy-neutral. Mount QQ's user-only
-  // activation layer only while all optional services are present; a service
+  // DSH and qq-session-index intentionally remain policy-neutral. Mount QQ's
+  // user-only layer only while all required services are present; a service
   // reload disposes every scoped grant before this injection is re-applied.
   const attachHistory = (holder) => attachSessionHistory(holder ?? ctx, { qq: service });
   if (typeof ctx.inject === "function") {
-    ctx.inject(["sessionQuery", "tools", "skills"], attachHistory);
+    ctx.inject(["sessionQuery", "qq-session-index", "tools", "skills"], attachHistory);
   } else {
     attachHistory(ctx);
   }
