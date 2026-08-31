@@ -515,17 +515,36 @@ function listImmediateChildProjects(root) {
   return projects;
 }
 
-export function listProjectCatalog(projectsRoot, registration) {
+export function listRegisteredProjectCatalog(projectsRoot, registration) {
   const root = canonicalPath(projectsRoot, "projectsRoot");
   const registrations = configuredCatalog(root, registration);
-  let registered = [];
-  if (registrations) {
-    try {
-      registered = listRegisteredProjects(root, registrations);
-    } catch (error) {
-      if (!registration?.implicit) throw error;
+  if (!registrations) return [];
+  try {
+    return listRegisteredProjects(root, registrations);
+  } catch (error) {
+    if (!registration?.implicit) throw error;
+    return [];
+  }
+}
+
+/** Search authorization roots; intentionally excludes unregistered discovery entries. */
+export function listCatalogWorkspaceIds(projectsRoot, registration) {
+  const root = canonicalPath(projectsRoot, "projectsRoot");
+  const workspaceIds = [root];
+  const seen = new Set(workspaceIds);
+  for (const project of listRegisteredProjectCatalog(root, registration)) {
+    for (const cwd of [project.cwd, ...(project.folders ?? []).map((folder) => folder.cwd)]) {
+      if (seen.has(cwd)) continue;
+      seen.add(cwd);
+      workspaceIds.push(cwd);
     }
   }
+  return workspaceIds;
+}
+
+export function listProjectCatalog(projectsRoot, registration) {
+  const root = canonicalPath(projectsRoot, "projectsRoot");
+  const registered = listRegisteredProjectCatalog(root, registration);
   const claimed = new Set(registered.flatMap((project) =>
     (project.folders ?? [project]).map((folder) => folder.cwd),
   ));
@@ -813,6 +832,10 @@ export function createQqService(ctx, config) {
 
   function catalog() {
     return listProjectCatalog(projectsRoot, loadProjectRegistration(config));
+  }
+
+  function authorizedWorkspaceIds() {
+    return listCatalogWorkspaceIds(projectsRoot, loadProjectRegistration(config));
   }
 
   const projectFiles = createProjectFileService(projectsRoot, catalog, {
@@ -2149,6 +2172,7 @@ export function createQqService(ctx, config) {
       return () => directUserMessageObservers.delete(observer);
     },
     listProjects: () => catalog(),
+    listAuthorizedWorkspaceIds: () => authorizedWorkspaceIds(),
     listProjectFiles: projectFiles.listProjectFiles,
     readProjectFile: projectFiles.readProjectFile,
     openProjectFile: projectFiles.openProjectFile,

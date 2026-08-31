@@ -34,7 +34,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$sim/bin" "$scratch/home" "$scratch/config"
+mkdir -p "$sim/bin" "$scratch/home" "$scratch/config" "$scratch/runtime"
+chmod 700 "$scratch/runtime"
 cp "$root/bin/qq" "$sim/bin/qq"
 cp "$root/package.json" "$root/host.patch.yml" "$root/project-catalog.json" "$sim/"
 ln -s "$root/src" "$sim/src"
@@ -56,7 +57,7 @@ stop_host() {
 boot() {
   local name=$1 state="$scratch/$1-state"
   env -u QQ_DSH_PROVIDER -u QQ_DSH_MODEL \
-    HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/config" DSH_HOME="$state" \
+    HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/config" XDG_RUNTIME_DIR="$scratch/runtime" DSH_HOME="$state" \
     npm_config_cache="$scratch/npm-cache" \
     DSH_TELEMETRY_DISABLED=1 \
     QQ_PORT="$port" QQ_PROJECTS_ROOT="$projects" QQ_DSH_CWD="$sim" \
@@ -80,6 +81,7 @@ boot core-only
 host_env="$scratch/core-only.env"
 tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
 grep -Fxq 'QQ_DSH_HAVE_INDEX=0' "$host_env"
+grep -Fxq "XDG_RUNTIME_DIR=$scratch/runtime" "$host_env"
 grep -Fxq 'QQ_DSH_HAVE_DASHBOARD=0' "$host_env"
 grep -Fxq "QQ_DSH_HMR_ROOTS=$sim" "$host_env"
 node - "$scratch/core-only-state/profiles/qq/package.json" "$sim" <<'NODE'
@@ -162,6 +164,7 @@ boot all-parts
 host_env="$scratch/all-parts.env"
 tr '\0' '\n' <"/proc/$pid/environ" >"$host_env"
 grep -Fxq 'QQ_DSH_HAVE_INDEX=1' "$host_env"
+grep -Fxq "XDG_RUNTIME_DIR=$scratch/runtime" "$host_env"
 grep -Fxq 'QQ_DSH_HAVE_DASHBOARD=1' "$host_env"
 hmr_roots=$(sed -n 's/^QQ_DSH_HMR_ROOTS=//p' "$host_env")
 for sibling_root in "$index_root" "$dashboard_root"; do
