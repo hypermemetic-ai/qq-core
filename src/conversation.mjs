@@ -76,6 +76,30 @@ export function dropReplacedNodes(nodes, start, end) {
   return asArray(nodes).filter((node) => !nodeTouchesRange(node, start, end));
 }
 
+function upsertContextMessage(nodes, message, event, { queued = false } = {}) {
+  if (!message || directHuman(message)) return undefined;
+  const messageId = String(message.id ?? "");
+  const index = messageId
+    ? nodes.findLastIndex((node) => node?.kind === "context" && node.messageId === messageId)
+    : -1;
+  const existing = index >= 0 ? nodes[index] : undefined;
+  const node = {
+    ...existing,
+    kind: "context",
+    key: existing?.key ?? (messageId ? `context-message:${messageId}` : `context:${event.seq}`),
+    seq: event.seq,
+    time: event.time,
+    messageId,
+    source: message.source ?? { kind: "unknown" },
+    content: asArray(message.content),
+    queued,
+    durable: !queued,
+  };
+  if (index >= 0) nodes[index] = node;
+  else nodes.push(node);
+  return node;
+}
+
 export function pendingFromInbox(inbox, nodes) {
   const pendingState = inbox && (Array.isArray(inbox.nextTurn) || Array.isArray(inbox.nextStep))
     ? inboxSnapshot(inbox)
@@ -180,36 +204,24 @@ export function applyUserMessage(conversation, event) {
     if (source?.kind === "plugin" && source?.plugin === "compact") {
       return { nodes: nextNodes, pending };
     }
-    nextNodes.push(directHuman(message)
-      ? {
-          kind: "user",
-          key: `user:${event.seq}`,
-          seq: event.seq,
-          time: event.time,
-          messageId: String(message?.id ?? ""),
-          content: asArray(message?.content),
-          ...clientCorrelation(message),
-        }
-      : {
-          kind: "context",
-          key: `context:${event.seq}`,
-          seq: event.seq,
-          time: event.time,
-          source: source ?? { kind: "unknown" },
-          content: asArray(message?.content),
-        });
+    if (directHuman(message)) {
+      nextNodes.push({
+        kind: "user",
+        key: `user:${event.seq}`,
+        seq: event.seq,
+        time: event.time,
+        messageId: String(message?.id ?? ""),
+        content: asArray(message?.content),
+        ...clientCorrelation(message),
+      });
+    } else {
+      upsertContextMessage(nextNodes, message, event);
+    }
     return { nodes: nextNodes, pending };
   }
   if (event.surfaceOp !== "append") return { nodes, pending };
   if (!directHuman(message)) {
-    nodes.push({
-      kind: "context",
-      key: `context:${event.seq}`,
-      seq: event.seq,
-      time: event.time,
-      source: message?.source ?? { kind: "unknown" },
-      content: asArray(message?.content),
-    });
+    upsertContextMessage(nodes, message, event);
     return { nodes, pending };
   }
   const id = String(message?.id ?? "");
@@ -534,12 +546,14 @@ export function applyConversationEvent(conversation, event, inbox, toolViews) {
     case "turn/end":
       next = applyTurnEnd(conversation, event);
       break;
-    case "agent/inbox/spliced":
-      next = {
-        nodes: Array.isArray(conversation.nodes) ? conversation.nodes : [],
-        pending: conversation.pending,
-      };
+    case "agent/inbox/spliced": {
+      const nodes = Array.isArray(conversation.nodes) ? conversation.nodes.slice() : [];
+      for (const message of asArray(event.data?.inserted)) {
+        upsertContextMessage(nodes, message, event, { queued: true });
+      }
+      next = { nodes, pending: conversation.pending };
       break;
+    }
     default:
       next = TRANSCRIPT_NEUTRAL.has(event.type) || event.surfaceOp !== "append"
         ? conversation
@@ -866,7 +880,12 @@ export function projectConversation(events, options = {}) {
         if (data.outcome !== "canceled") {
           for (const item of removed) pushClaim(item.message, target, event, openTurn);
         }
-        const inserted = asArray(data.inserted).map((message) => ({ message, insertedSeq: event.seq }));
+        const insertedMessages = asArray(data.inserted);
+        for (const message of insertedMessages) {
+          const context = upsertContextMessage(nodes, message, event, { queued: true });
+          if (context) nodeIndex.set(context.key, context);
+        }
+        const inserted = insertedMessages.map((message) => ({ message, insertedSeq: event.seq }));
         list.splice(start, count, ...inserted);
         break;
       }
@@ -883,14 +902,8 @@ export function projectConversation(events, options = {}) {
             break;
           }
           if (!directHuman(message)) {
-            addNode({
-              kind: "context",
-              key: `context:${event.seq}`,
-              seq: event.seq,
-              time: event.time,
-              source: message?.source ?? { kind: "unknown" },
-              content: asArray(message?.content),
-            });
+            const context = upsertContextMessage(nodes, message, event);
+            if (context) nodeIndex.set(context.key, context);
             break;
           }
           addNode({
@@ -906,14 +919,8 @@ export function projectConversation(events, options = {}) {
         }
         if (event.surfaceOp !== "append") break;
         if (!directHuman(message)) {
-          addNode({
-            kind: "context",
-            key: `context:${event.seq}`,
-            seq: event.seq,
-            time: event.time,
-            source: message?.source ?? { kind: "unknown" },
-            content: asArray(message?.content),
-          });
+          const context = upsertContextMessage(nodes, message, event);
+          if (context) nodeIndex.set(context.key, context);
           break;
         }
         const occurrence = takeClaim(message?.id);

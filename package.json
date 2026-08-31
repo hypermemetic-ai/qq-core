@@ -26,6 +26,6 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node tests/conversation-failure.mjs && node tests/session-history.mjs && node tests/repository-geometry.mjs && node tests/agent-surface.mjs && node tests/projects-chair.mjs && tests/host-boot.sh"
+    "test": "node tests/conversation-failure.mjs && node tests/session-responsiveness.mjs && node tests/session-history.mjs && node tests/repository-geometry.mjs && node tests/agent-surface.mjs && node tests/projects-chair.mjs && tests/host-boot.sh"
   }
 }
