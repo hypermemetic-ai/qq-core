@@ -470,6 +470,7 @@ export function applyTurnEnd(conversation, event) {
       time: event.time,
       turn: data.turn,
       code: safeFailureCode(reason.error?.code),
+      detail: safeFailureDetail(reason.error),
     });
   } else if (["aborted", "interrupted", "blocked", "max-tokens"].includes(reason.kind)) {
     nodes.push({
@@ -621,6 +622,21 @@ function commandSpecializedSource(eventBySeq, seq) {
 
 function safeFailureCode(value) {
   return typeof value === "string" && /^[A-Z0-9_-]{1,80}$/.test(value) ? value : "";
+}
+
+const VISIBLE_FAILURE_DETAILS = new Set(["PROVIDER", "RATE_LIMIT", "QUOTA_EXCEEDED"]);
+
+function safeFailureDetail(error) {
+  const code = safeFailureCode(error?.code);
+  if (!VISIBLE_FAILURE_DETAILS.has(code) || typeof error?.message !== "string") return "";
+  const detail = error.message
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted-jwt]")
+    .replace(/\b(?:sk|sess|token|key)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted-token]")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return detail.length <= 600 ? detail : `${detail.slice(0, 600)}…`;
 }
 
 function compactionText(blocks) {
@@ -1160,6 +1176,7 @@ export function projectConversation(events, options = {}) {
             time: event.time,
             turn: data.turn,
             code: safeFailureCode(reason.error?.code),
+            detail: safeFailureDetail(reason.error),
           });
         } else if (["aborted", "interrupted", "blocked", "max-tokens"].includes(reason.kind)) {
           addNode({
