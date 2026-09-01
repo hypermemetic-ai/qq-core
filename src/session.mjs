@@ -27,9 +27,18 @@ const PROJECTS_ALIAS = "projects";
 // Agent so a qq fiber replacement can rebuild its index without owning or
 // disposing the Agent itself.
 export const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq-core/agent-handle");
+// Child transcript folds are expensive to reconstruct while a delegated turn is
+// still growing. Keep the fold on the DSH-owned Agent, just like its handle, so
+// a qq-core fiber replacement can adopt the current incremental projection.
+export const CHILD_PROJECTION = Symbol.for("@hypermemetic-ai/qq-core/child-projection");
 const CORDIS_ORIGINAL = Symbol.for("cordis.original");
 const DELEGATE_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/delegate-create-guard");
 const AGENT_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/agent-create-guard");
+// This record is data-only and Agent-owned so an unchanged live transcript can
+// keep its recency index when qq-core's module fiber is replaced by HMR.
+const AGENT_RECENCY = Symbol.for("@hypermemetic-ai/qq-core/agent-recency-v1");
+const AGENT_RECENCY_VERSION = 1;
+const fallbackAgentRecencies = new WeakMap();
 
 export function adoptAgentHandle(handle) {
   const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
@@ -567,18 +576,85 @@ export function isRootOperatorAgent(agent) {
   return true;
 }
 
-export function sessionRecency(session, fallbackCreatedAt = 0) {
-  const events = Array.isArray(session?.events) ? session.events : [];
-  let latest = 0;
-  for (const event of events) {
-    const time = event?.time;
-    const value = typeof time === "number" ? time : Date.parse(time ?? "");
-    if (Number.isFinite(value) && value > latest) latest = value;
-  }
+function eventTime(event) {
+  const time = event?.time;
+  const value = typeof time === "number" ? time : Date.parse(time ?? "");
+  return Number.isFinite(value) ? value : 0;
+}
+
+function recencyResult(session, latest, fallbackCreatedAt) {
   const createdAt = Number.isFinite(session?.header?.createdAt)
     ? session.header.createdAt
     : (Number.isFinite(session?.createdAt) ? session.createdAt : fallbackCreatedAt);
   return { latest, createdAt: createdAt || 0, id: String(session?.id ?? "") };
+}
+
+export function sessionRecency(session, fallbackCreatedAt = 0) {
+  const events = Array.isArray(session?.events) ? session.events : [];
+  let latest = 0;
+  for (const event of events) latest = Math.max(latest, eventTime(event));
+  return recencyResult(session, latest, fallbackCreatedAt);
+}
+
+function installAgentRecency(agent, session, events) {
+  const state = {
+    version: AGENT_RECENCY_VERSION,
+    session,
+    events,
+    length: 0,
+    latest: 0,
+  };
+  fallbackAgentRecencies.set(agent, state);
+  try {
+    Object.defineProperty(agent, AGENT_RECENCY, {
+      value: state,
+      configurable: true,
+    });
+  } catch {
+    // A non-extensible third-party Agent still gets generation-safe caching for
+    // this module incarnation through the WeakMap.
+  }
+  return state;
+}
+
+function cachedAgentRecency(agent, fallbackCreatedAt = 0) {
+  const session = agent?.session;
+  const events = Array.isArray(session?.events) ? session.events : [];
+  let state = agent && typeof agent === "object" ? agent[AGENT_RECENCY] : undefined;
+  if (
+    state?.version !== AGENT_RECENCY_VERSION
+    || state.session !== session
+    || state.events !== events
+  ) {
+    state = agent && typeof agent === "object" ? fallbackAgentRecencies.get(agent) : undefined;
+  }
+  if (
+    state?.version !== AGENT_RECENCY_VERSION
+    || state.session !== session
+    || state.events !== events
+  ) {
+    if (!agent || typeof agent !== "object") return sessionRecency(session, fallbackCreatedAt);
+    state = installAgentRecency(agent, session, events);
+  }
+
+  // DSH Session events are append-only for one live Agent generation. A
+  // truncation is nevertheless handled fail-safely by rebuilding this one
+  // Agent; ordinary appends visit only the unseen suffix.
+  if (events.length < state.length) {
+    state.length = 0;
+    state.latest = 0;
+  }
+  for (let index = state.length; index < events.length; index += 1) {
+    state.latest = Math.max(state.latest, eventTime(events[index]));
+  }
+  state.length = events.length;
+  return recencyResult(session, state.latest, fallbackCreatedAt);
+}
+
+function clearCachedAgentRecency(agent) {
+  if (!agent || typeof agent !== "object") return;
+  fallbackAgentRecencies.delete(agent);
+  try { delete agent[AGENT_RECENCY]; } catch {}
 }
 
 export function compareSessionRecency(left, right) {
@@ -798,6 +874,7 @@ export function createQqService(ctx, config) {
   const sessionObservers = new Map();
   const directUserMessageObservers = new Set();
   const defaultCreatedAt = Date.now();
+  let syncedLiveKey;
 
   function notifyDirectUserMessage(event) {
     for (const observer of [...directUserMessageObservers]) {
@@ -1024,7 +1101,10 @@ export function createQqService(ctx, config) {
     adoptAgentHandle(handle);
     const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
     const sessionId = owner?.agent?.session?.id;
-    if (SESSION_ID.test(sessionId)) handles.set(sessionId, owner);
+    if (SESSION_ID.test(sessionId)) {
+      handles.set(sessionId, owner);
+      warmChildProjection(owner.agent);
+    }
     return handle;
   }
 
@@ -1033,6 +1113,7 @@ export function createQqService(ctx, config) {
   for (const agent of liveAgents()) {
     const handle = agent?.[AGENT_HANDLE];
     if (handle && typeof handle.dispose === "function") handles.set(agent.session.id, handle);
+    warmChildProjection(agent);
   }
 
   function syncLive(extraId) {
@@ -1040,14 +1121,21 @@ export function createQqService(ctx, config) {
     if (SESSION_ID.test(extraId) && !isUnpublished(extraId) && !ids.includes(extraId)) {
       ids.push(extraId);
     }
-    for (const agent of liveProjectsAgents()) {
-      book.pin(agent.session.id, PROJECTS_ALIAS);
-    }
+    const projectsAgents = liveProjectsAgents();
+    const projectIds = projectsAgents.map((agent) => agent.session.id);
     const extra = SESSION_ID.test(extraId) ? agents.get(extraId) : undefined;
-    if (extra && classifyAgent(extra)?.scope === "projects") {
-      book.pin(extraId, PROJECTS_ALIAS);
+    if (extra && classifyAgent(extra)?.scope === "projects" && !projectIds.includes(extraId)) {
+      projectIds.push(extraId);
     }
+    const key = JSON.stringify([
+      [...ids].sort(),
+      [...projectIds].sort(),
+    ]);
+    if (key === syncedLiveKey) return false;
+    for (const sessionId of projectIds) book.pin(sessionId, PROJECTS_ALIAS);
     book.sync(ids);
+    syncedLiveKey = key;
+    return true;
   }
 
   function chairSnapshotRow(agent) {
@@ -1111,6 +1199,7 @@ export function createQqService(ctx, config) {
       if (handle && typeof handle.dispose === "function") handles.set(sessionId, handle);
       rememberStatus(agent);
       syncLive(sessionId);
+      warmChildProjection(agent);
       const relationship = childRelationship(agent);
       if (relationship) rebuildAndNotify(relationship.parent);
     });
@@ -1124,8 +1213,10 @@ export function createQqService(ctx, config) {
       const sessionId = agent?.session?.id;
       const relationship = childRelationship(agent);
       if (SESSION_ID.test(sessionId)) {
-        statusSince.delete(sessionId);
-        projections.delete(sessionId);
+        const current = agents.get(sessionId);
+        if (!current || current === agent) statusSince.delete(sessionId);
+        releaseProjection(agent);
+        clearCachedAgentRecency(agent);
       }
       if (relationship) rebuildAndNotify(relationship.parent);
       // Host shutdown disposes every Agent. That is not operator close — do
@@ -1178,9 +1269,9 @@ export function createQqService(ctx, config) {
       ?? (agent.session.id === defaultSessionId ? defaultCreatedAt : 0);
   }
 
-  function rowFor(agent) {
+  function rowFor(agent, knownRecency) {
     const classified = classifyVisibleAgent(agent);
-    const recency = sessionRecency(agent.session, createdAtFor(agent));
+    const recency = knownRecency ?? cachedAgentRecency(agent, createdAtFor(agent));
     const alias = book.aliasFor(agent.session.id);
     if (classified?.kind === "child") {
       return {
@@ -1268,7 +1359,12 @@ export function createQqService(ctx, config) {
   }
 
   function stampIdentity(agent, snapshot) {
-    const row = rowFor(agent);
+    // Identity fields do not depend on transcript recency. In particular, a
+    // retained child bootstrap must not walk its complete live event array.
+    const row = rowFor(agent, {
+      createdAt: snapshot?.createdAt ?? createdAtFor(agent),
+      latest: 0,
+    });
     const relationship = relationshipFields(agent);
     const next = {
       ...snapshot,
@@ -1563,28 +1659,57 @@ export function createQqService(ctx, config) {
     return Array.isArray(events) ? events.length : 0;
   }
 
-  function rememberProjection(agent, conversation, events, snapshot) {
+  function retainedProjection(agent) {
+    const retained = agent?.[CHILD_PROJECTION];
+    if (
+      retained?.agent !== agent
+      || !Number.isSafeInteger(retained?.seq)
+      || !retained?.conversation
+      || !retained?.snapshot
+    ) return undefined;
+    return retained;
+  }
+
+  function cachedProjection(agent) {
+    const sessionId = agent?.session?.id;
+    if (!SESSION_ID.test(sessionId)) return undefined;
+    const cached = projections.get(sessionId);
+    if (cached?.agent === agent) return cached;
+    if (cached) projections.delete(sessionId);
+    if (!childRelationship(agent)) return undefined;
+    const retained = retainedProjection(agent);
+    if (retained) projections.set(sessionId, retained);
+    return retained;
+  }
+
+  function rememberProjection(agent, conversation, events, snapshot, nextSeq = projectionSeq(agent, events)) {
     const sessionId = agent.session.id;
-    projections.set(sessionId, {
+    const retained = childRelationship(agent) ? retainedProjection(agent) : undefined;
+    const projection = retained ?? (projections.get(sessionId)?.agent === agent
+      ? projections.get(sessionId)
+      : {});
+    Object.assign(projection, {
       agent,
-      seq: projectionSeq(agent, events),
+      seq: nextSeq,
       conversation,
       events,
       snapshot,
     });
+    projections.set(sessionId, projection);
+    if (childRelationship(agent) && retained !== projection) {
+      try {
+        Object.defineProperty(agent, CHILD_PROJECTION, {
+          value: projection,
+          configurable: true,
+        });
+      } catch {
+        // Non-extensible Agents retain their projection for this service apply.
+      }
+    }
     return snapshot;
   }
 
-  async function read(sessionId) {
-    await boot;
-    const agent = await liveAgent(sessionId);
-    const cached = projections.get(sessionId);
-    const liveSeq = projectionSeq(agent);
-    if (cached && cached.agent === agent && cached.seq === liveSeq && cached.snapshot) {
-      const snapshot = stampIdentity(agent, cached.snapshot);
-      cached.snapshot = snapshot;
-      return snapshot;
-    }
+  function rebuildProjection(agent) {
     const events = agent.session.events;
     let toolViews;
     try {
@@ -1601,6 +1726,79 @@ export function createQqService(ctx, config) {
       toolViews,
     });
     return rememberProjection(agent, conversation, events, decorateSnapshot(agent, conversation, events));
+  }
+
+  function catchUpProjection(agent, cached = cachedProjection(agent)) {
+    if (!cached) return undefined;
+    const liveSeq = projectionSeq(agent);
+    if (cached.seq === liveSeq) return cached;
+    if (!Number.isSafeInteger(liveSeq) || cached.seq > liveSeq) return undefined;
+
+    const events = agent?.session?.events;
+    if (!Array.isArray(events)) return undefined;
+    const startSeq = cached.seq;
+    // DSH seq values are dense log indexes. Fold only the suffix that arrived
+    // while this service was not listening; never refold the retained prefix.
+    const missing = events.slice(startSeq, liveSeq);
+    if (
+      missing.length !== liveSeq - startSeq
+      || missing.some((event, index) => event?.seq !== startSeq + index)
+    ) return undefined;
+
+    let conversation = cached.conversation;
+    let turnStatus = cached.snapshot.turnStatus;
+    let snapshotEvents = cached.events;
+    let refreshSnapshotEvents = false;
+    for (const event of missing) {
+      const toolViews = toolViewsFor(event, agent, conversation);
+      conversation = applyConversationEvent(conversation, event, agent?.inbox, toolViews);
+      if (!conversation) return undefined;
+      turnStatus = applyTurnStatus(turnStatus, event);
+      if (event.type !== "assistant/chunk") refreshSnapshotEvents = true;
+    }
+    if (refreshSnapshotEvents) snapshotEvents = events;
+
+    const snapshot = stampIdentity(agent, {
+      ...cached.snapshot,
+      conversation,
+      events: snapshotEvents,
+      turnStatus,
+      agentStatus: agent.status ?? cached.snapshot.agentStatus,
+    });
+    rememberProjection(agent, conversation, snapshotEvents, snapshot, liveSeq);
+    return cachedProjection(agent);
+  }
+
+  function warmChildProjection(agent) {
+    if (!childRelationship(agent)) return undefined;
+    const cached = cachedProjection(agent);
+    if (cached) {
+      const current = catchUpProjection(agent, cached);
+      if (current) return current;
+    }
+    rebuildProjection(agent);
+    return cachedProjection(agent);
+  }
+
+  function releaseProjection(agent) {
+    const sessionId = agent?.session?.id;
+    const cached = SESSION_ID.test(sessionId) ? projections.get(sessionId) : undefined;
+    if (cached?.agent === agent) projections.delete(sessionId);
+    try { delete agent?.[CHILD_PROJECTION]; } catch {}
+  }
+
+  async function read(sessionId) {
+    await boot;
+    const agent = await liveAgent(sessionId);
+    let cached = cachedProjection(agent);
+    const liveSeq = projectionSeq(agent);
+    if (cached && cached.seq !== liveSeq) cached = catchUpProjection(agent, cached);
+    if (cached && cached.seq === liveSeq && cached.snapshot) {
+      const snapshot = stampIdentity(agent, cached.snapshot);
+      cached.snapshot = snapshot;
+      return snapshot;
+    }
+    return rebuildProjection(agent);
   }
 
   async function inspect(sessionId) {
@@ -1679,7 +1877,7 @@ export function createQqService(ctx, config) {
           }]
         : await list(snapshot.project, snapshot.folder ?? "");
     const next = { ...snapshot, sessions: available };
-    const cached = projections.get(sessionId);
+    const cached = cachedProjection(agents.get(sessionId));
     if (cached) cached.snapshot = next;
     return next;
   }
@@ -1888,6 +2086,8 @@ export function createQqService(ctx, config) {
       });
       handles.delete(sessionId);
       agentPromises.delete(sessionId);
+      releaseProjection(agent);
+      clearCachedAgentRecency(agent);
       try { delete agent?.[AGENT_HANDLE]; } catch {}
       syncLive();
       persistLiveChairs();
@@ -1911,6 +2111,8 @@ export function createQqService(ctx, config) {
     }
     handles.delete(sessionId);
     agentPromises.delete(sessionId);
+    releaseProjection(agent);
+    clearCachedAgentRecency(agent);
     try { delete agent?.[AGENT_HANDLE]; } catch {}
     syncLive();
     persistLiveChairs();
@@ -2114,7 +2316,9 @@ export function createQqService(ctx, config) {
 
   function rebuildAndNotify(sessionId) {
     if (!observersFor(sessionId)) {
-      projections.delete(sessionId);
+      const agent = agents.get(sessionId);
+      if (childRelationship(agent)) warmChildProjection(agent);
+      else projections.delete(sessionId);
       return;
     }
     if (rebuilds.has(sessionId)) {
@@ -2143,31 +2347,36 @@ export function createQqService(ctx, config) {
     ctx.on("session/event", (session, event) => {
       const sessionId = session?.id;
       if (!SESSION_ID.test(sessionId)) return;
-      const cached = projections.get(sessionId);
+      const agent = agents.get(sessionId);
+      // A delayed event from a disposed generation must never mutate a new Agent
+      // that happens to have reused the same session id.
+      if (!agent || agent.session !== session) return;
+      cachedAgentRecency(agent, createdAtFor(agent));
+      const cached = cachedProjection(agent) ?? warmChildProjection(agent);
       if (cached && Number.isSafeInteger(event?.seq) && event.seq < cached.seq) return;
       if (cached && cached.seq === event.seq) {
-        const agent = agents.get(sessionId) ?? cached.agent;
         const toolViews = toolViewsFor(event, agent, cached.conversation);
         const conversation = applyConversationEvent(cached.conversation, event, agent?.inbox, toolViews);
         if (conversation) {
           const events = event.type === "assistant/chunk"
             ? cached.events
-            : (agent?.session?.events ?? cached.events);
+            : (agent.session.events ?? cached.events);
           const snapshot = stampIdentity(agent, {
             ...cached.snapshot,
             conversation,
             events,
             turnStatus: applyTurnStatus(cached.snapshot.turnStatus, event),
-            agentStatus: agent?.status ?? cached.snapshot.agentStatus,
+            agentStatus: agent.status ?? cached.snapshot.agentStatus,
           });
-          projections.set(sessionId, {
-            agent,
-            seq: event.seq + 1,
-            conversation,
-            events,
-            snapshot,
-          });
+          rememberProjection(agent, conversation, events, snapshot, event.seq + 1);
           notifySession(sessionId, snapshot);
+          return;
+        }
+      }
+      if (cached && Number.isSafeInteger(event?.seq) && cached.seq < event.seq) {
+        const current = catchUpProjection(agent, cached);
+        if (current && current.seq > event.seq) {
+          notifySession(sessionId, current.snapshot);
           return;
         }
       }
@@ -2175,8 +2384,12 @@ export function createQqService(ctx, config) {
     });
     ctx.on("agent/status", ({ agent }) => {
       const sessionId = agent?.session?.id;
-      if (!SESSION_ID.test(sessionId) || !observersFor(sessionId)) return;
-      const cached = projections.get(sessionId);
+      if (!SESSION_ID.test(sessionId)) return;
+      const child = Boolean(childRelationship(agent));
+      if (!child && !observersFor(sessionId)) return;
+      let cached = cachedProjection(agent);
+      if (cached && cached.seq !== projectionSeq(agent)) cached = catchUpProjection(agent, cached);
+      if (!cached && child) cached = warmChildProjection(agent);
       if (cached) {
         const snapshot = stampIdentity(agent, { ...cached.snapshot, agentStatus: agent.status });
         cached.snapshot = snapshot;
@@ -2215,7 +2428,7 @@ export function createQqService(ctx, config) {
         .map((agent) => {
           const id = agent.session.id;
           const alias = book.aliasFor(id) || "";
-          const recency = sessionRecency(agent.session, createdAtFor(agent));
+          const recency = cachedAgentRecency(agent, createdAtFor(agent));
           return makeAgentRow(agent, {
             now: clock(),
             alias,
@@ -2230,7 +2443,7 @@ export function createQqService(ctx, config) {
       const agent = agents.get(sessionId);
       if (!agent) throw httpError(404, NOT_FOUND);
       const alias = book.aliasFor(sessionId) || "";
-      const recency = sessionRecency(agent.session, createdAtFor(agent));
+      const recency = cachedAgentRecency(agent, createdAtFor(agent));
       return makeAgentRow(agent, {
         now: clock(),
         alias,
@@ -2423,7 +2636,7 @@ export function createQqService(ctx, config) {
       void view(sessionId).then(
         (snapshot) => {
           if (cancelled || !listeners.has(listener)) return;
-          cheapFp = `${snapshot.agentStatus ?? ""}:${projections.get(sessionId)?.seq ?? ""}`;
+          cheapFp = `${snapshot.agentStatus ?? ""}:${cachedProjection(agents.get(sessionId))?.seq ?? ""}`;
           try { listener(null, snapshot); } catch {}
         },
         (error) => {
@@ -2439,7 +2652,7 @@ export function createQqService(ctx, config) {
           const agent = requireLiveAgent(sessionId);
           const liveSeq = projectionSeq(agent);
           const fp = `${agent?.status ?? ""}:${liveSeq}`;
-          const cached = projections.get(sessionId);
+          const cached = cachedProjection(agent);
           const current = Boolean(cached && cached.seq === liveSeq && cached.snapshot?.agentStatus === agent.status);
           if (fp !== cheapFp && !current) {
             cheapFp = fp;
@@ -2486,5 +2699,6 @@ export const internals = Object.freeze({
   isImmediateChild,
   hostAgents,
   adoptAgentHandle,
+  CHILD_PROJECTION,
   unwrapAgents,
 });
