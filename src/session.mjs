@@ -1647,10 +1647,54 @@ export function createQqService(ctx, config) {
     return rememberProjection(agent, conversation, events, decorateSnapshot(agent, conversation, events));
   }
 
+  function catchUpProjection(agent, cached = cachedProjection(agent)) {
+    if (!cached) return undefined;
+    const liveSeq = projectionSeq(agent);
+    if (cached.seq === liveSeq) return cached;
+    if (!Number.isSafeInteger(liveSeq) || cached.seq > liveSeq) return undefined;
+
+    const events = agent?.session?.events;
+    if (!Array.isArray(events)) return undefined;
+    const startSeq = cached.seq;
+    // DSH seq values are dense log indexes. Fold only the suffix that arrived
+    // while this service was not listening; never refold the retained prefix.
+    const missing = events.slice(startSeq, liveSeq);
+    if (
+      missing.length !== liveSeq - startSeq
+      || missing.some((event, index) => event?.seq !== startSeq + index)
+    ) return undefined;
+
+    let conversation = cached.conversation;
+    let turnStatus = cached.snapshot.turnStatus;
+    let snapshotEvents = cached.events;
+    let refreshSnapshotEvents = false;
+    for (const event of missing) {
+      const toolViews = toolViewsFor(event, agent, conversation);
+      conversation = applyConversationEvent(conversation, event, agent?.inbox, toolViews);
+      if (!conversation) return undefined;
+      turnStatus = applyTurnStatus(turnStatus, event);
+      if (event.type !== "assistant/chunk") refreshSnapshotEvents = true;
+    }
+    if (refreshSnapshotEvents) snapshotEvents = events;
+
+    const snapshot = stampIdentity(agent, {
+      ...cached.snapshot,
+      conversation,
+      events: snapshotEvents,
+      turnStatus,
+      agentStatus: agent.status ?? cached.snapshot.agentStatus,
+    });
+    rememberProjection(agent, conversation, snapshotEvents, snapshot, liveSeq);
+    return cachedProjection(agent);
+  }
+
   function warmChildProjection(agent) {
     if (!childRelationship(agent)) return undefined;
     const cached = cachedProjection(agent);
-    if (cached) return cached;
+    if (cached) {
+      const current = catchUpProjection(agent, cached);
+      if (current) return current;
+    }
     rebuildProjection(agent);
     return cachedProjection(agent);
   }
@@ -1665,8 +1709,9 @@ export function createQqService(ctx, config) {
   async function read(sessionId) {
     await boot;
     const agent = await liveAgent(sessionId);
-    const cached = cachedProjection(agent);
+    let cached = cachedProjection(agent);
     const liveSeq = projectionSeq(agent);
+    if (cached && cached.seq !== liveSeq) cached = catchUpProjection(agent, cached);
     if (cached && cached.seq === liveSeq && cached.snapshot) {
       const snapshot = stampIdentity(agent, cached.snapshot);
       cached.snapshot = snapshot;
@@ -2189,7 +2234,7 @@ export function createQqService(ctx, config) {
   function rebuildAndNotify(sessionId) {
     if (!observersFor(sessionId)) {
       const agent = agents.get(sessionId);
-      if (childRelationship(agent)) rebuildProjection(agent);
+      if (childRelationship(agent)) warmChildProjection(agent);
       else projections.delete(sessionId);
       return;
     }
@@ -2244,6 +2289,13 @@ export function createQqService(ctx, config) {
           return;
         }
       }
+      if (cached && Number.isSafeInteger(event?.seq) && cached.seq < event.seq) {
+        const current = catchUpProjection(agent, cached);
+        if (current && current.seq > event.seq) {
+          notifySession(sessionId, current.snapshot);
+          return;
+        }
+      }
       rebuildAndNotify(sessionId);
     });
     ctx.on("agent/status", ({ agent }) => {
@@ -2251,7 +2303,9 @@ export function createQqService(ctx, config) {
       if (!SESSION_ID.test(sessionId)) return;
       const child = Boolean(childRelationship(agent));
       if (!child && !observersFor(sessionId)) return;
-      const cached = cachedProjection(agent) ?? (child ? warmChildProjection(agent) : undefined);
+      let cached = cachedProjection(agent);
+      if (cached && cached.seq !== projectionSeq(agent)) cached = catchUpProjection(agent, cached);
+      if (!cached && child) cached = warmChildProjection(agent);
       if (cached) {
         const snapshot = stampIdentity(agent, { ...cached.snapshot, agentStatus: agent.status });
         cached.snapshot = snapshot;

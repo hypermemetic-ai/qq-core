@@ -46,11 +46,15 @@ function makeFixture() {
   function makeAgent(id, meta, { trapHistory = false } = {}) {
     const history = [];
     let forbidIteration = false;
+    const historyReads = [];
     const events = trapHistory
       ? new Proxy(history, {
           get(target, property, receiver) {
             if (forbidIteration && property === Symbol.iterator) {
               throw new Error("full child history replayed");
+            }
+            if (forbidIteration && typeof property === "string" && /^(?:0|[1-9][0-9]*)$/.test(property)) {
+              historyReads.push(Number(property));
             }
             return Reflect.get(target, property, receiver);
           },
@@ -72,7 +76,11 @@ function makeFixture() {
     return {
       agent,
       history,
-      forbidHistoryIteration() { forbidIteration = true; },
+      forbidHistoryIteration() {
+        forbidIteration = true;
+        historyReads.length = 0;
+      },
+      historyReads() { return [...historyReads]; },
     };
   }
 
@@ -144,8 +152,9 @@ function makeFixture() {
     return event;
   }
 
-  function reload() {
+  function reload(whileDisposed) {
     for (const off of scopedEffects.splice(0).reverse()) off();
+    whileDisposed?.();
     service = createQqService(ctx, config);
     services.set("qq-core", service);
     return service;
@@ -203,18 +212,33 @@ try {
   // fold instead.
   const retainedBeforeReload = child.agent[CHILD_PROJECTION];
   child.forbidHistoryIteration();
-  fixture.reload();
+  fixture.reload(() => {
+    assert.equal(fixture.listenerCount("session/event"), 0, "old HMR listener is fully torn down");
+    fixture.append(child, "user/message", {
+      id: "message-during-hmr",
+      role: "user",
+      content: [{ type: "text", text: "continued while qq-core was reapplied" }],
+      source: { kind: "user" },
+    });
+  });
   assert.equal(
     child.agent[CHILD_PROJECTION],
     retainedBeforeReload,
     "HMR adopts the exact retained incremental projection",
   );
+  assert.equal(child.agent[CHILD_PROJECTION].seq, 34, "HMR catches up the retained projection");
+  assert.equal(child.agent[CHILD_PROJECTION].conversation.nodes.length, 33);
+  assert.deepEqual(child.historyReads(), [33], "HMR reads only the event missed during listener replacement");
   assert.equal(fixture.listenerCount("session/event"), 1, "HMR replaces rather than duplicates the event listener");
 
   const page = await fixture.service.read(CHILD_ID);
   assert.equal(page.origin, "subagent");
   assert.equal(page.parent, PARENT_ID);
-  assert.equal(page.conversation.nodes.length, 32);
+  assert.equal(page.conversation.nodes.length, 33);
+  assert.equal(
+    page.conversation.nodes.filter((node) => node.messageId === "message-during-hmr").length,
+    1,
+  );
 
   const bootstrap = await new Promise((resolve, reject) => {
     let stop;
@@ -231,8 +255,13 @@ try {
       resolve(snapshot);
     }, { intervalMs: 60_000 });
   });
-  assert.equal(bootstrap.conversation.nodes.length, 32);
+  assert.equal(bootstrap.conversation.nodes.length, 33);
   assert.equal(bootstrap.origin, "subagent");
+  assert.deepEqual(
+    child.historyReads(),
+    [33],
+    "page and SSE bootstrap reuse the caught-up fold without rereading history",
+  );
 
   fixture.append(child, "user/message", {
     id: "message-after-hmr",
@@ -240,9 +269,9 @@ try {
     content: [{ type: "text", text: "continued after HMR" }],
     source: { kind: "user" },
   });
-  assert.equal(child.agent[CHILD_PROJECTION].seq, 34);
+  assert.equal(child.agent[CHILD_PROJECTION].seq, 35);
   const continued = await fixture.service.read(CHILD_ID);
-  assert.equal(continued.conversation.nodes.length, 33, "post-HMR event applies exactly once");
+  assert.equal(continued.conversation.nodes.length, 34, "post-HMR event applies exactly once");
   assert.equal(
     continued.conversation.nodes.filter((node) => node.messageId === "message-after-hmr").length,
     1,
@@ -252,7 +281,7 @@ try {
   // generation cannot contaminate a replacement with the same id.
   const oldSession = child.agent.session;
   const replacement = fixture.addChild();
-  const stale = { type: "turn/start", seq: 34, time: 99, data: { turn: 2 } };
+  const stale = { type: "turn/start", seq: 35, time: 99, data: { turn: 2 } };
   child.history.push(stale);
   fixture.emit("session/event", oldSession, stale);
   assert.equal(replacement.agent[CHILD_PROJECTION].seq, 0, "stale generation event is ignored");
