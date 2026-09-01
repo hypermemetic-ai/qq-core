@@ -107,14 +107,18 @@ export function farthestFirst(candidates, liveAliases, rng = Math.random) {
   return tied[Math.min(tied.length - 1, Math.floor(rng() * tied.length))];
 }
 
-/** First integer above 100 that is distinct from every live alias. */
+/** Prefer a spoken-distinct overflow alias, but never sacrifice availability for pronunciation. */
 export function overflowCandidate(liveAliases, forbidden = new Set()) {
+  let fallback = null;
   for (let candidate = OVERFLOW_START; candidate <= OVERFLOW_LIMIT; candidate += 1) {
-    if (forbidden.has(String(candidate))) continue;
-    if (isNeighborOfLive(String(candidate), liveAliases)) continue;
-    if (sharesRootWithLive(String(candidate), liveAliases)) continue;
-    return String(candidate);
+    const alias = String(candidate);
+    if (forbidden.has(alias)) continue;
+    fallback ??= alias;
+    if (isNeighborOfLive(alias, liveAliases)) continue;
+    if (sharesRootWithLive(alias, liveAliases)) continue;
+    return alias;
   }
+  if (fallback !== null) return fallback;
   throw new Error("qq: alias capacity exhausted");
 }
 
