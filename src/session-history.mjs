@@ -499,6 +499,11 @@ function canonicalSequence(value) {
     && Number.isSafeInteger(Number(value));
 }
 
+function protocolSessionId(value) {
+  return typeof value === "string" && Buffer.byteLength(value, "utf8") >= 1
+    && Buffer.byteLength(value, "utf8") <= 128;
+}
+
 function validateBatchResponse(response, queryCount) {
   requireObject(response, "qq-session-index search response");
   if (response.type !== "searchBatch" || response.version !== SEARCH_BATCH_RESPONSE_VERSION) {
@@ -530,7 +535,7 @@ function validateBatchResponse(response, queryCount) {
     for (const [rank, hit] of source.ranked.entries()) {
       const pointer = hit?.evidence;
       if (!hit || typeof hit !== "object" || hit.rank !== rank + 1
-          || !SESSION_ID.test(hit.sessionId) || sourceIds.has(hit.sessionId)
+          || !protocolSessionId(hit.sessionId) || sourceIds.has(hit.sessionId)
           || !Number.isFinite(hit.score) || !pointer || typeof pointer !== "object"
           || pointer.sessionId !== hit.sessionId || !pointer.documentKey
           || typeof pointer.documentKey !== "string" || !canonicalSequence(pointer.seq)
@@ -546,7 +551,7 @@ function validateBatchResponse(response, queryCount) {
   const fusedIds = new Set();
   for (const [index, candidate] of response.fused.entries()) {
     if (!candidate || typeof candidate !== "object" || candidate.rank !== index + 1
-        || !SESSION_ID.test(candidate.sessionId) || fusedIds.has(candidate.sessionId)
+        || !protocolSessionId(candidate.sessionId) || fusedIds.has(candidate.sessionId)
         || !Number.isFinite(candidate.rrfScore) || !Array.isArray(candidate.contributions)
         || candidate.contributions.length < 1
         || candidate.contributions.length > queryCount) {
@@ -570,7 +575,37 @@ function validateBatchResponse(response, queryCount) {
       ordinals.add(contribution.queryOrdinal);
     }
   }
-  return response;
+
+  // Validate the complete untrusted protocol response before applying the qq-core
+  // identity boundary. Durable databases may contain legacy raw UUID sessions,
+  // but exact DSH reads and authoritative metadata only accept canonical IDs.
+  // Keep original ranks/contributions: filtering must not reinterpret the daemon
+  // snapshot or allow an invalid field on an omitted row to escape validation.
+  const canonicalEvidence = new Set();
+  const sources = response.sources.map((source) => ({
+    ...source,
+    ranked: source.ranked.filter((hit) => {
+      if (!SESSION_ID.test(hit.sessionId)) return false;
+      canonicalEvidence.add(evidenceKey(
+        hit.sessionId,
+        source.queryOrdinal,
+        hit.evidence.seq,
+        hit.evidence.documentKey,
+      ));
+      return true;
+    }),
+  }));
+  const fused = response.fused.filter((candidate) => (
+    SESSION_ID.test(candidate.sessionId) && candidate.contributions.some((contribution) => (
+      canonicalEvidence.has(evidenceKey(
+        candidate.sessionId,
+        contribution.queryOrdinal,
+        contribution.seq,
+        contribution.documentKey,
+      ))
+    ))
+  ));
+  return { ...response, sources, fused };
 }
 
 function evidenceKey(sessionId, queryOrdinal, seq, documentKey) {
