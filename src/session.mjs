@@ -30,6 +30,11 @@ export const AGENT_HANDLE = Symbol.for("@hypermemetic-ai/qq-core/agent-handle");
 const CORDIS_ORIGINAL = Symbol.for("cordis.original");
 const DELEGATE_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/delegate-create-guard");
 const AGENT_CREATE_GUARD = Symbol.for("@hypermemetic-ai/qq-core/agent-create-guard");
+// This record is data-only and Agent-owned so an unchanged live transcript can
+// keep its recency index when qq-core's module fiber is replaced by HMR.
+const AGENT_RECENCY = Symbol.for("@hypermemetic-ai/qq-core/agent-recency-v1");
+const AGENT_RECENCY_VERSION = 1;
+const fallbackAgentRecencies = new WeakMap();
 
 export function adoptAgentHandle(handle) {
   const owner = handle && typeof handle.dispose === "function" ? handle : undefined;
@@ -567,18 +572,85 @@ export function isRootOperatorAgent(agent) {
   return true;
 }
 
-export function sessionRecency(session, fallbackCreatedAt = 0) {
-  const events = Array.isArray(session?.events) ? session.events : [];
-  let latest = 0;
-  for (const event of events) {
-    const time = event?.time;
-    const value = typeof time === "number" ? time : Date.parse(time ?? "");
-    if (Number.isFinite(value) && value > latest) latest = value;
-  }
+function eventTime(event) {
+  const time = event?.time;
+  const value = typeof time === "number" ? time : Date.parse(time ?? "");
+  return Number.isFinite(value) ? value : 0;
+}
+
+function recencyResult(session, latest, fallbackCreatedAt) {
   const createdAt = Number.isFinite(session?.header?.createdAt)
     ? session.header.createdAt
     : (Number.isFinite(session?.createdAt) ? session.createdAt : fallbackCreatedAt);
   return { latest, createdAt: createdAt || 0, id: String(session?.id ?? "") };
+}
+
+export function sessionRecency(session, fallbackCreatedAt = 0) {
+  const events = Array.isArray(session?.events) ? session.events : [];
+  let latest = 0;
+  for (const event of events) latest = Math.max(latest, eventTime(event));
+  return recencyResult(session, latest, fallbackCreatedAt);
+}
+
+function installAgentRecency(agent, session, events) {
+  const state = {
+    version: AGENT_RECENCY_VERSION,
+    session,
+    events,
+    length: 0,
+    latest: 0,
+  };
+  fallbackAgentRecencies.set(agent, state);
+  try {
+    Object.defineProperty(agent, AGENT_RECENCY, {
+      value: state,
+      configurable: true,
+    });
+  } catch {
+    // A non-extensible third-party Agent still gets generation-safe caching for
+    // this module incarnation through the WeakMap.
+  }
+  return state;
+}
+
+function cachedAgentRecency(agent, fallbackCreatedAt = 0) {
+  const session = agent?.session;
+  const events = Array.isArray(session?.events) ? session.events : [];
+  let state = agent && typeof agent === "object" ? agent[AGENT_RECENCY] : undefined;
+  if (
+    state?.version !== AGENT_RECENCY_VERSION
+    || state.session !== session
+    || state.events !== events
+  ) {
+    state = agent && typeof agent === "object" ? fallbackAgentRecencies.get(agent) : undefined;
+  }
+  if (
+    state?.version !== AGENT_RECENCY_VERSION
+    || state.session !== session
+    || state.events !== events
+  ) {
+    if (!agent || typeof agent !== "object") return sessionRecency(session, fallbackCreatedAt);
+    state = installAgentRecency(agent, session, events);
+  }
+
+  // DSH Session events are append-only for one live Agent generation. A
+  // truncation is nevertheless handled fail-safely by rebuilding this one
+  // Agent; ordinary appends visit only the unseen suffix.
+  if (events.length < state.length) {
+    state.length = 0;
+    state.latest = 0;
+  }
+  for (let index = state.length; index < events.length; index += 1) {
+    state.latest = Math.max(state.latest, eventTime(events[index]));
+  }
+  state.length = events.length;
+  return recencyResult(session, state.latest, fallbackCreatedAt);
+}
+
+function clearCachedAgentRecency(agent) {
+  if (!agent || typeof agent !== "object") return;
+  fallbackAgentRecencies.delete(agent);
+  try { delete agent[AGENT_RECENCY]; } catch {}
 }
 
 export function compareSessionRecency(left, right) {
@@ -798,6 +870,7 @@ export function createQqService(ctx, config) {
   const sessionObservers = new Map();
   const directUserMessageObservers = new Set();
   const defaultCreatedAt = Date.now();
+  let syncedLiveKey;
 
   function notifyDirectUserMessage(event) {
     for (const observer of [...directUserMessageObservers]) {
@@ -1040,14 +1113,21 @@ export function createQqService(ctx, config) {
     if (SESSION_ID.test(extraId) && !isUnpublished(extraId) && !ids.includes(extraId)) {
       ids.push(extraId);
     }
-    for (const agent of liveProjectsAgents()) {
-      book.pin(agent.session.id, PROJECTS_ALIAS);
-    }
+    const projectsAgents = liveProjectsAgents();
+    const projectIds = projectsAgents.map((agent) => agent.session.id);
     const extra = SESSION_ID.test(extraId) ? agents.get(extraId) : undefined;
-    if (extra && classifyAgent(extra)?.scope === "projects") {
-      book.pin(extraId, PROJECTS_ALIAS);
+    if (extra && classifyAgent(extra)?.scope === "projects" && !projectIds.includes(extraId)) {
+      projectIds.push(extraId);
     }
+    const key = JSON.stringify([
+      [...ids].sort(),
+      [...projectIds].sort(),
+    ]);
+    if (key === syncedLiveKey) return false;
+    for (const sessionId of projectIds) book.pin(sessionId, PROJECTS_ALIAS);
     book.sync(ids);
+    syncedLiveKey = key;
+    return true;
   }
 
   function chairSnapshotRow(agent) {
@@ -1126,6 +1206,7 @@ export function createQqService(ctx, config) {
       if (SESSION_ID.test(sessionId)) {
         statusSince.delete(sessionId);
         projections.delete(sessionId);
+        clearCachedAgentRecency(agent);
       }
       if (relationship) rebuildAndNotify(relationship.parent);
       // Host shutdown disposes every Agent. That is not operator close — do
@@ -1180,7 +1261,7 @@ export function createQqService(ctx, config) {
 
   function rowFor(agent) {
     const classified = classifyVisibleAgent(agent);
-    const recency = sessionRecency(agent.session, createdAtFor(agent));
+    const recency = cachedAgentRecency(agent, createdAtFor(agent));
     const alias = book.aliasFor(agent.session.id);
     if (classified?.kind === "child") {
       return {
@@ -1888,6 +1969,7 @@ export function createQqService(ctx, config) {
       });
       handles.delete(sessionId);
       agentPromises.delete(sessionId);
+      clearCachedAgentRecency(agent);
       try { delete agent?.[AGENT_HANDLE]; } catch {}
       syncLive();
       persistLiveChairs();
@@ -1911,6 +1993,7 @@ export function createQqService(ctx, config) {
     }
     handles.delete(sessionId);
     agentPromises.delete(sessionId);
+    clearCachedAgentRecency(agent);
     try { delete agent?.[AGENT_HANDLE]; } catch {}
     syncLive();
     persistLiveChairs();
@@ -2143,6 +2226,8 @@ export function createQqService(ctx, config) {
     ctx.on("session/event", (session, event) => {
       const sessionId = session?.id;
       if (!SESSION_ID.test(sessionId)) return;
+      const eventAgent = agents.get(sessionId);
+      if (eventAgent?.session === session) cachedAgentRecency(eventAgent, createdAtFor(eventAgent));
       const cached = projections.get(sessionId);
       if (cached && Number.isSafeInteger(event?.seq) && event.seq < cached.seq) return;
       if (cached && cached.seq === event.seq) {
@@ -2215,7 +2300,7 @@ export function createQqService(ctx, config) {
         .map((agent) => {
           const id = agent.session.id;
           const alias = book.aliasFor(id) || "";
-          const recency = sessionRecency(agent.session, createdAtFor(agent));
+          const recency = cachedAgentRecency(agent, createdAtFor(agent));
           return makeAgentRow(agent, {
             now: clock(),
             alias,
@@ -2230,7 +2315,7 @@ export function createQqService(ctx, config) {
       const agent = agents.get(sessionId);
       if (!agent) throw httpError(404, NOT_FOUND);
       const alias = book.aliasFor(sessionId) || "";
-      const recency = sessionRecency(agent.session, createdAtFor(agent));
+      const recency = cachedAgentRecency(agent, createdAtFor(agent));
       return makeAgentRow(agent, {
         now: clock(),
         alias,
