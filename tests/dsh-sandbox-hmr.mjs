@@ -29,12 +29,17 @@ assert.deepEqual(pins.dsh.patches, [{
   file: patch.file,
   originalSha256: patch.originalSha256,
   patchedSha256: patch.patchedSha256,
-  purpose: "Treat equal or narrower requested sandbox modes as the standing policy without approval",
+  purpose: "Validate sandbox modes, then treat equal or narrower requests as the standing policy without approval",
 }]);
 const toolchainPackage = JSON.parse(readFileSync(join(packageRoot, "dsh", "package.json"), "utf8"));
 assert.equal(toolchainPackage.scripts.postinstall, "node apply-pinned-patches.mjs");
 
-const { approveEscalation } = await importPackage("dsh-sandbox");
+const { approveEscalation, WIDER_MODES } = await importPackage("dsh-sandbox");
+assert.deepEqual(WIDER_MODES, {
+  "read-only": ["workspace-write", "danger-full-access"],
+  "workspace-write": ["danger-full-access"],
+  "danger-full-access": [],
+}, "sandbox mode table must contain the complete closed vocabulary");
 let approvalCalls = 0;
 const noApproval = {
   approver: { async request() { approvalCalls += 1; return "allowed-once"; } },
@@ -46,6 +51,22 @@ const request = (requestedMode, effectiveMode) => ({
   justification: "exercise the exact centralized sandbox contract",
   subject: "command",
 });
+for (const [requestedMode, effectiveMode] of [
+  ["not-a-mode", "not-a-mode"],
+  ["", ""],
+  [undefined, undefined],
+  ["toString", "toString"],
+  ["not-a-mode", "read-only"],
+  ["read-only", "not-a-mode"],
+]) {
+  await assert.rejects(
+    approveEscalation(request(requestedMode, effectiveMode), noApproval),
+    /is not strictly wider/,
+    `invalid sandbox pair ${String(requestedMode)}/${String(effectiveMode)} must fail closed`,
+  );
+}
+assert.equal(approvalCalls, 0, "invalid sandbox modes must fail before approval");
+
 for (const [requestedMode, effectiveMode] of [
   ["read-only", "read-only"],
   ["workspace-write", "workspace-write"],

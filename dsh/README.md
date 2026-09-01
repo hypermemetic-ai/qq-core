@@ -23,7 +23,9 @@ qq-core executor wrapper.
 
 The patch is tied to the package version and exact before/after SHA-256 values
 recorded in `pins.json`. Installation fails closed on any package or source
-drift. Equal and narrower requests retain the standing policy without an
+drift. Both requested and standing modes must belong to the closed sandbox
+vocabulary; malformed modes fail before approval even when they are equal.
+Valid equal and narrower requests retain the standing policy without an
 approval prompt; only strictly wider requests enter the existing approval
 flow, and rejection still prevents execution. Escalation schema fields remain
 optional.

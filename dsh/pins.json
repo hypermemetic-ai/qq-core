@@ -12,8 +12,8 @@
         "version": "0.1.0-rc.7",
         "file": "lib/index.js",
         "originalSha256": "63ee2a10873a336162acd9a0d7da7f5f3dc59d072456a0b5271da277565e324f",
-        "patchedSha256": "a3228d460eb0b36354d4e2d33d17a266c4671e59f4ae5afd6a47020a4d975958",
-        "purpose": "Treat equal or narrower requested sandbox modes as the standing policy without approval"
+        "patchedSha256": "6ba9df009c4f02066dc78ea2abdeffdfeb37c5eef3292298fdad7d00629d39c3",
+        "purpose": "Validate sandbox modes, then treat equal or narrower requests as the standing policy without approval"
       }
     ]
   }
