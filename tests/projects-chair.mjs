@@ -14,7 +14,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { projectConversation } from "../src/conversation.mjs";
-import { createQqService } from "../src/session.mjs";
+import { createQqService, sessionRecency } from "../src/session.mjs";
 
 const packageRoot = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -78,6 +78,7 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
   let createFailure;
   let createCalls = 0;
   let resumeCalls = 0;
+  let rngCalls = 0;
 
   function header(id, cwd) {
     return { id, cwd, createdAt: Date.now() };
@@ -243,9 +244,24 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     ["loader", { async await() {} }],
   ]);
   const effects = [];
+  const ctxListeners = new Map();
   const ctx = {
     get(name) { return services.get(name); },
     logger: { warn() {} },
+    on(type, listener) {
+      let listeners = ctxListeners.get(type);
+      if (!listeners) {
+        listeners = new Set();
+        ctxListeners.set(type, listeners);
+      }
+      listeners.add(listener);
+      const release = () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) ctxListeners.delete(type);
+      };
+      effects.push(release);
+      return release;
+    },
     effect(factory) {
       const release = factory();
       if (typeof release === "function") effects.push(release);
@@ -268,18 +284,18 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     liveChairsFile: files.chairs,
     scratchRoot: files.scratch,
     scopeFile: files.scopes,
-    rng: () => 0,
+    rng: () => { rngCalls += 1; return 0; },
     now: () => 1,
   };
   let service = createQqService(ctx, config);
   services.set("qq-core", service);
   services.set("qq", service);
 
-  function reload() {
+  function reload(factory = createQqService) {
     for (const release of effects.splice(0).reverse()) {
       try { release(); } catch {}
     }
-    service = createQqService(ctx, config);
+    service = factory(ctx, config);
     services.set("qq-core", service);
     services.set("qq", service);
     return service;
@@ -291,14 +307,53 @@ function makeFixture({ liveProjects = true, staleProjects = false } = {}) {
     agents,
     ctx,
     setService(name, value) { services.set(name, value); },
+    emit(type, ...args) {
+      for (const listener of [...(ctxListeners.get(type) ?? [])]) listener(...args);
+    },
     files,
     setupRecords,
     reload,
     get createCalls() { return createCalls; },
     get resumeCalls() { return resumeCalls; },
+    get rngCalls() { return rngCalls; },
     failNextCreate(error = new Error("fake: create failed")) { createFailure = error; },
     cleanup() { rmSync(root, { recursive: true, force: true }); },
   };
+}
+
+function countedEvents(source) {
+  let reads = 0;
+  const events = new Proxy(source, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) reads += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  return {
+    events,
+    get reads() { return reads; },
+  };
+}
+
+// Preserve the public pure helper's empty, fallback-created, invalid-time, and
+// out-of-order maximum semantics while the live service uses its cached path.
+{
+  const session = {
+    id: BOOT_ID,
+    header: {},
+    createdAt: 321,
+    events: [
+      { time: 40 },
+      { time: "1970-01-01T00:00:00.090Z" },
+      { time: Number.NaN },
+      { time: 15 },
+    ],
+  };
+  assert.deepEqual(sessionRecency(session, 123), { latest: 90, createdAt: 321, id: BOOT_ID });
+  assert.deepEqual(
+    sessionRecency({ id: BOOT_ID, header: {}, events: [] }, 123),
+    { latest: 0, createdAt: 123, id: BOOT_ID },
+  );
 }
 
 function projectsAgents(fixture) {
@@ -658,6 +713,169 @@ assert.notEqual(newId, clearId, "/new and /clear must each mint a fresh session 
       activeFilters(homeSetup),
       [{ allow: ["bash"] }],
       "surface.allow must unhide tools on agents created after qq-core HMR",
+    );
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+{
+  const fixture = makeFixture();
+  try {
+    const agent = fixture.agents.get(BOOT_ID);
+    agent.session.header.createdAt = 1_234;
+    const LARGE_EVENT_COUNT = 20_000;
+    const source = Array.from({ length: LARGE_EVENT_COUNT }, (_, seq) => ({
+      type: "test/event",
+      seq,
+      time: seq === 10 ? 900_000 : seq,
+      data: {},
+    }));
+    const counted = countedEvents(source);
+    agent.session.events = counted.events;
+    agent.session.seq = LARGE_EVENT_COUNT;
+
+    fixture.service.inspectAgent(BOOT_ID);
+    assert.equal(counted.reads, LARGE_EVENT_COUNT, "first live recency read indexes the transcript once");
+    const initial = await fixture.service.inspect(BOOT_ID);
+    assert.equal(initial.createdAt, 1_234);
+    assert.equal(initial.latestEventAt, 900_000);
+
+    const afterInitialScan = counted.reads;
+    for (let index = 0; index < 8; index += 1) {
+      fixture.service.listAgents();
+      fixture.service.inspectAgent(BOOT_ID);
+      await fixture.service.list();
+      const inspected = await fixture.service.inspect(BOOT_ID);
+      assert.equal(inspected.latestEventAt, 900_000);
+    }
+    assert.equal(
+      counted.reads,
+      afterInitialScan,
+      "repeated catalog, row, and inspect reads must not revisit the transcript",
+    );
+
+    // Warm the ordinary session snapshot once. Later cached snapshot identity
+    // stamping calls rowFor(), but must not rescan recency.
+    await fixture.service.read(BOOT_ID);
+    const afterSnapshotWarm = counted.reads;
+    for (let index = 0; index < 8; index += 1) await fixture.service.read(BOOT_ID);
+    assert.equal(
+      counted.reads,
+      afterSnapshotWarm,
+      "cached snapshot identity stamping must keep recency work bounded",
+    );
+
+    const newer = {
+      type: "turn/start",
+      seq: agent.session.seq,
+      time: 1_000_000,
+      data: { turn: 1 },
+    };
+    agent.session.events.push(newer);
+    agent.session.seq += 1;
+    const beforeNewer = counted.reads;
+    fixture.emit("session/event", agent.session, newer);
+    assert.equal(counted.reads - beforeNewer, 1, "one append visits only the new durable event");
+    assert.equal((await fixture.service.inspect(BOOT_ID)).latestEventAt, 1_000_000);
+
+    const olderOutOfOrder = {
+      type: "turn/end",
+      seq: agent.session.seq,
+      time: 50,
+      data: { turn: 1, reason: { kind: "done" } },
+    };
+    agent.session.events.push(olderOutOfOrder);
+    agent.session.seq += 1;
+    const beforeOlder = counted.reads;
+    fixture.emit("session/event", agent.session, olderOutOfOrder);
+    assert.equal(counted.reads - beforeOlder, 1, "out-of-order append remains constant work");
+    assert.equal((await fixture.service.inspect(BOOT_ID)).latestEventAt, 1_000_000);
+
+    const beforeHmr = counted.reads;
+    const replacementModule = await import(`../src/session.mjs?recency-hmr=${Date.now()}`);
+    fixture.reload(replacementModule.createQqService);
+    assert.equal((await fixture.service.inspect(BOOT_ID)).latestEventAt, 1_000_000);
+    assert.equal(
+      counted.reads,
+      beforeHmr,
+      "a fresh qq-core module must adopt the Agent-owned recency index",
+    );
+
+    const oldAgent = agent;
+    const replacementHandle = await fixture.agents.create({
+      sessionId: BOOT_ID,
+      meta: { cwd: oldAgent.session.header.cwd, createdAt: 7_654 },
+      setup() {},
+    });
+    const replacement = replacementHandle.agent;
+    const replacementCounted = countedEvents([{
+      type: "test/event",
+      seq: 0,
+      time: 77,
+      data: {},
+    }]);
+    replacement.session.events = replacementCounted.events;
+    replacement.session.seq = 1;
+    const replacementRow = await fixture.service.inspect(BOOT_ID);
+    assert.equal(replacementRow.createdAt, 7_654);
+    assert.equal(replacementRow.latestEventAt, 77);
+    assert.equal(replacementCounted.reads, 1, "a replacement Agent gets its own generation index");
+
+    fixture.emit("agent/disposed", { agent: oldAgent });
+    const staleEvent = {
+      type: "turn/start",
+      seq: oldAgent.session.seq,
+      time: 2_000_000,
+      data: { turn: 2 },
+    };
+    oldAgent.session.events.push(staleEvent);
+    oldAgent.session.seq += 1;
+    fixture.emit("session/event", oldAgent.session, staleEvent);
+    assert.equal(
+      (await fixture.service.inspect(BOOT_ID)).latestEventAt,
+      77,
+      "a disposed generation's event cannot poison its same-id replacement",
+    );
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+{
+  const fixture = makeFixture();
+  try {
+    const beforeSecondProjects = fixture.rngCalls;
+    const secondProjects = await fixture.agents.create({
+      sessionId: STALE_PROJECTS_ID,
+      meta: { cwd: fixture.service.projectsRoot },
+      setup() {},
+    });
+    fixture.service.listAgents();
+    assert.ok(
+      fixture.rngCalls > beforeSecondProjects,
+      "the multi-Projects transition must exercise reserved-alias re-dealing",
+    );
+    const stableRngCalls = fixture.rngCalls;
+    for (let index = 0; index < 20; index += 1) {
+      fixture.service.listAgents();
+      await fixture.service.list();
+    }
+    assert.equal(
+      fixture.rngCalls,
+      stableRngCalls,
+      "unchanged polling must not re-pin/re-deal the same live alias set",
+    );
+
+    await secondProjects.dispose();
+    fixture.service.listAgents();
+    assert.equal(projectsAliasHolder(fixture), OLD_PROJECTS_ID, "Projects pin follows the live-set transition");
+    const afterDisposeRngCalls = fixture.rngCalls;
+    for (let index = 0; index < 20; index += 1) fixture.service.listAgents();
+    assert.equal(
+      fixture.rngCalls,
+      afterDisposeRngCalls,
+      "the post-disposal live set also remains stable across polling",
     );
   } finally {
     fixture.cleanup();
