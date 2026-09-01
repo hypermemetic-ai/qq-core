@@ -40,7 +40,7 @@ cp "$root/bin/qq" "$sim/bin/qq"
 cp "$root/package.json" "$root/host.patch.yml" "$root/project-catalog.json" "$sim/"
 ln -s "$root/src" "$sim/src"
 mkdir -p "$sim/dsh"
-cp "$root/dsh/package.json" "$root/dsh/package-lock.json" "$root/dsh/qq-dsh-model-compat.mjs" "$sim/dsh/"
+cp "$root/dsh/package.json" "$root/dsh/package-lock.json" "$root/dsh/apply-pinned-patches.mjs" "$root/dsh/qq-dsh-model-compat.mjs" "$sim/dsh/"
 for installed_toolchain in "$root/dsh/node_modules" "$parts/qq-core/dsh/node_modules"; do
   if [[ -x $installed_toolchain/.bin/dsh ]]; then
     ln -s "$installed_toolchain" "$sim/dsh/node_modules"

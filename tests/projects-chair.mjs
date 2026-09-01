@@ -18,6 +18,11 @@ import { createQqService } from "../src/session.mjs";
 
 const packageRoot = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
 
+// Host validators may describe this checkout through Git environment overrides.
+// Fixture repositories and imported workflow subprocesses must honor their own
+// explicit `-C` roots instead of inheriting the validator's worktree metadata.
+for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]) delete process.env[name];
+
 function siblingProject(name) {
   const envName = `QQ_${name.replace(/^qq-/, "").toUpperCase().replaceAll("-", "_")}_ROOT`;
   const configured = process.env[envName];
