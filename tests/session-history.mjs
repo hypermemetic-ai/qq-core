@@ -9,6 +9,7 @@ const IDS = Array.from({ length: 12 }, (_, index) => (
   `session-00000000-0000-4000-8000-${String(index + 2).padStart(12, "0")}`
 ));
 const BASE_TIME = Date.parse("2026-08-30T12:00:00.000Z");
+assert.equal(internals.DEFAULT_SEARCH_TIMEOUT_MS, 15_000);
 
 function event(seq, type, text, time = BASE_TIME + seq) {
   if (type === "user/message") {
@@ -29,8 +30,11 @@ function fixtureCandidate({
   evidence,
   score = 0.05,
   title = "",
+  logicalEventCount = 0,
 }) {
-  return { sessionId, workspace, live, persisted, createdAt, evidence, score, title };
+  return {
+    sessionId, workspace, live, persisted, createdAt, evidence, score, title, logicalEventCount,
+  };
 }
 
 function makeHarness(candidates, options = {}) {
@@ -43,6 +47,8 @@ function makeHarness(candidates, options = {}) {
   const searchOptions = [];
   const verifyOptions = [];
   const tokenWorkspaces = [];
+  const eventFilterCalls = [];
+  const eventReadCalls = [];
   const events = new Map();
   const records = new Map();
   const titles = new Map();
@@ -65,6 +71,17 @@ function makeHarness(candidates, options = {}) {
         sessionId: candidate.sessionId,
       });
     }
+    for (let seq = 0; seq < candidate.logicalEventCount; seq += 1) {
+      const key = `${candidate.sessionId}:${seq}`;
+      if (events.has(key)) continue;
+      const text = `generated large-session filler event ${seq}`;
+      events.set(key, {
+        ...event(seq, seq % 2 ? "assistant/message" : "user/message", text, BASE_TIME + seq),
+        surface: seq % 3 ? "current" : "shadowed",
+        text,
+        sessionId: candidate.sessionId,
+      });
+    }
   }
 
   const sessionQuery = {
@@ -80,18 +97,42 @@ function makeHarness(candidates, options = {}) {
       return filters[0].values.flatMap((id) => records.has(id) ? [structuredClone(records.get(id))] : []);
     },
     async filterEvents(sessionId, filters) {
-      assert.deepEqual(filters, [{ kind: "seq", from: filters[0].from, to: filters[0].to }]);
+      eventFilterCalls.push({ sessionId, filters: structuredClone(filters) });
       activeReads += 1;
       peakReads = Math.max(peakReads, activeReads);
       try {
+        if (options.filterNeverSettles) return new Promise(() => {});
         if (options.readDelay) await delay(options.readDelay);
-        const found = events.get(`${sessionId}:${filters[0].from}`);
-        return found ? [structuredClone(found)] : [];
+        if (options.failFilter) throw new Error("semantic scan unavailable");
+        let documents = [...events.entries()]
+          .filter(([key]) => key.startsWith(`${sessionId}:`))
+          .map(([, value]) => structuredClone(value))
+          .sort((left, right) => left.seq - right.seq);
+        for (const filter of filters) {
+          if (filter.kind === "seq") {
+            documents = documents.filter(({ seq }) => seq >= filter.from && seq <= filter.to);
+          } else if (filter.kind === "time") {
+            documents = documents.filter(({ time }) => (
+              (filter.from === undefined || time >= filter.from)
+              && (filter.to === undefined || time <= filter.to)
+            ));
+          } else if (filter.kind === "type") {
+            documents = documents.filter(({ type }) => filter.values.includes(type));
+          } else if (filter.kind === "surface") {
+            documents = documents.filter(({ surface }) => filter.values.includes(surface));
+          } else {
+            assert.fail(`unexpected event filter ${filter.kind}`);
+          }
+        }
+        return options.transformFilteredDocuments
+          ? options.transformFilteredDocuments(documents, sessionId)
+          : documents;
       } finally {
         activeReads -= 1;
       }
     },
     async readEvent(request, signal) {
+      eventReadCalls.push(structuredClone(request));
       signal?.throwIfAborted?.();
       if (options.readDelay) await delay(options.readDelay);
       signal?.throwIfAborted?.();
@@ -137,13 +178,15 @@ function makeHarness(candidates, options = {}) {
       searchOptions.push(operation);
       operation?.signal?.throwIfAborted?.();
       if (options.failSearch) throw new Error("durable index failed");
+      if (options.searchNeverSettles) await new Promise(() => {});
       if (options.searchWaitForAbort) {
         await new Promise((resolve, reject) => {
           operation.signal.addEventListener("abort", () => reject(operation.signal.reason), { once: true });
         });
       }
       if (options.malformedResponse) return { bad: true };
-      return responseFor(candidates, request.literals.length);
+      const response = responseFor(candidates, request.literals.length);
+      return options.transformResponse ? options.transformResponse(response) : response;
     },
     async verifyDshSearchCandidates(argument) {
       verifyCalls += 1;
@@ -194,6 +237,7 @@ function makeHarness(candidates, options = {}) {
   const adapter = createSessionHistoryAdapter(sessionQuery, index, {
     aliasFor: (id) => id === candidates[0]?.sessionId ? "12" : "",
     listAuthorizedWorkspaceIds: options.listAuthorizedWorkspaceIds ?? (() => ["/work", "/other"]),
+    ...(options.searchTimeoutMs === undefined ? {} : { searchTimeoutMs: options.searchTimeoutMs }),
   });
   return {
     adapter,
@@ -207,6 +251,8 @@ function makeHarness(candidates, options = {}) {
     searchOptions,
     verifyOptions,
     tokenWorkspaces,
+    eventFilterCalls,
+    eventReadCalls,
   };
 }
 
@@ -303,7 +349,7 @@ for (let count = 1; count <= 5; count += 1) {
   const harness = makeHarness([candidate]);
   const result = await harness.adapter.search({ action: "search", queries }, execution());
   assert.equal(harness.searchCalls, 1, `${count} literals must use one batch`);
-  assert.equal(harness.verifyCalls, 1);
+  assert.equal(harness.verifyCalls, 0, "qq-core must not invoke coordinate-oriented verification");
   assert.equal(harness.legacyCalls, 0);
   assert.deepEqual(harness.requests[0].literals, queries);
   assert.equal(harness.requests[0].version, "search-batch-v1");
@@ -312,9 +358,8 @@ for (let count = 1; count <= 5; count += 1) {
   assert.deepEqual(harness.requests[0].filters.eventTypeAllowList, ["user/message", "assistant/message"]);
   assert.deepEqual(harness.requests[0].filters.surfaceAllowList, ["current", "shadowed"]);
   assert.deepEqual(harness.tokenWorkspaces, ["/work"]);
-  assert.equal(harness.verifyOptions[0].maxConcurrency, internals.MAX_VERIFICATION_CONCURRENCY);
-  assert.equal(harness.verifyOptions[0].maxCandidates, internals.MAX_VERIFICATION_POINTERS);
-  assert.equal(harness.verifyOptions[0].signal, undefined);
+  assert.equal(harness.eventFilterCalls.length, 1, "one candidate session has one semantic scan");
+  assert.equal(harness.eventReadCalls.length, 0, "search never performs detached coordinate reads");
   assert.equal(harness.peakReads <= internals.MAX_VERIFICATION_CONCURRENCY, true);
   assert.equal(result.results.length, 1);
   assert.equal(result.results[0].matchedQueryCount, count);
@@ -337,6 +382,8 @@ for (let count = 1; count <= 5; count += 1) {
   assert.deepEqual(other.requests[0].filters.excludeSessionIds, [CALLER]);
   assert.deepEqual(other.requests[0].filters.workspaceIds, ["/work"]);
   assert.deepEqual(result.results.map(({ sessionId }) => sessionId), [IDS[1]]);
+  assert.deepEqual(other.eventFilterCalls.map(({ sessionId }) => sessionId), [IDS[1]],
+    "unauthorized and excluded sessions must not be scanned");
 
   const current = makeHarness(candidates);
   const currentResult = await current.adapter.search({
@@ -345,6 +392,7 @@ for (let count = 1; count <= 5; count += 1) {
   assert.deepEqual(current.requests[0].filters.includeSessionIds, [CALLER]);
   assert.equal(current.requests[0].filters.notAfterEventTimeUnixMs, BASE_TIME + 1);
   assert.deepEqual(currentResult.results.map(({ sessionId }) => sessionId), [CALLER]);
+  assert.deepEqual(current.eventFilterCalls.map(({ sessionId }) => sessionId), [CALLER]);
 
   const all = makeHarness(candidates);
   const allResult = await all.adapter.search({
@@ -357,22 +405,125 @@ for (let count = 1; count <= 5; count += 1) {
   assert.equal("includeSessionIds" in all.requests[0].filters, false);
   assert.equal("excludeSessionIds" in all.requests[0].filters, false);
   assert.deepEqual(allResult.results.map(({ sessionId }) => sessionId), [CALLER, IDS[1]]);
+  for (const { filters } of all.eventFilterCalls) {
+    assert.deepEqual(filters, [
+      { kind: "time", from: BASE_TIME, to: BASE_TIME + 49 },
+      { kind: "type", values: ["user/message", "assistant/message"] },
+      { kind: "surface", values: ["current", "shadowed"] },
+    ]);
+  }
 }
 
-// A stale event whose authoritative time/text changed is omitted even when both
-// the index response and a malformed verifier claim it is valid.
+// Regression for the measured baseline (5 verifier scans + 5 materializer
+// reads): many coordinates in one large logical session now cause one scan.
 {
+  const clues = ["alpha clue", "bravo clue", "charlie clue", "delta clue", "echo clue"];
+  const candidate = fixtureCandidate({
+    sessionId: IDS[2],
+    evidence: clues.map((text, queryOrdinal) => evidence(queryOrdinal, queryOrdinal + 1, text)),
+    logicalEventCount: 50_000,
+  });
+  const harness = makeHarness([candidate]);
+  const result = await harness.adapter.search({ action: "search", queries: clues }, execution());
+  assert.equal(result.results.length, 1);
+  assert.equal(harness.eventFilterCalls.length, 1, "authoritative work is O(unique sessions)");
+  assert.deepEqual(harness.eventFilterCalls[0], {
+    sessionId: IDS[2],
+    filters: [
+      { kind: "type", values: ["user/message", "assistant/message"] },
+      { kind: "surface", values: ["current", "shadowed"] },
+    ],
+  });
+  assert.equal(harness.eventReadCalls.length, 0);
+  assert.equal(harness.verifyCalls, 0);
+}
+
+// Distinct sessions are each scanned once, with at most four complete semantic
+// document arrays resident concurrently.
+{
+  const candidates = Array.from({ length: 6 }, (_, index) => fixtureCandidate({
+    sessionId: IDS[index],
+    evidence: [evidence(0, index + 1, `bounded scan clue ${index}`)],
+  }));
+  const harness = makeHarness(candidates, { readDelay: 10 });
+  const result = await harness.adapter.search({
+    action: "search", queries: ["bounded scan clue"], limit: 6,
+  }, execution());
+  assert.equal(result.results.length, 6);
+  assert.equal(harness.eventFilterCalls.length, 6);
+  assert.equal(new Set(harness.eventFilterCalls.map(({ sessionId }) => sessionId)).size, 6);
+  assert.equal(harness.peakReads, internals.MAX_VERIFICATION_CONCURRENCY);
+  assert.equal(harness.eventReadCalls.length, 0);
+}
+
+// Missing/stale and type/surface/text mismatches all fail closed. The complete
+// candidate is omitted rather than retaining a partial fused score.
+for (const [mode, transformFilteredDocuments] of [
+  ["missing", () => []],
+  ["stale-seq", (documents) => documents.map((document) => ({ ...document, seq: document.seq + 1 }))],
+  ["type", (documents) => documents.map((document) => ({ ...document, type: "tool/result" }))],
+  ["surface", (documents) => documents.map((document) => ({ ...document, surface: "raw" }))],
+  ["text", (documents) => documents.map((document) => ({ ...document, text: "authoritative replacement" }))],
+]) {
   const stale = fixtureCandidate({ sessionId: IDS[3], evidence: [evidence(0, 4, "fresh literal")] });
-  const harness = makeHarness([stale]);
-  const original = harness.sessionQuery.readEvent;
-  harness.sessionQuery.readEvent = async (...args) => {
-    const observed = await original(...args);
-    observed.target.data.content[0].text = "authoritative replacement";
-    return observed;
-  };
+  const harness = makeHarness([stale], { transformFilteredDocuments });
   const result = await harness.adapter.search({ action: "search", queries: ["fresh literal"] }, execution());
-  assert.deepEqual(result.results, []);
+  assert.deepEqual(result.results, [], `${mode} evidence must be omitted`);
+  assert.equal(harness.eventFilterCalls.length, 1);
   assert.equal(harness.legacyCalls, 0);
+}
+
+// Authoritative time is locally rechecked even when an injected filter violates
+// its own predicate, and ordinary scan failures omit the affected session.
+{
+  const candidate = fixtureCandidate({ sessionId: IDS[3], evidence: [evidence(0, 5, "time clue")] });
+  const after = new Date(BASE_TIME).toISOString();
+  const before = new Date(BASE_TIME + 10).toISOString();
+  const badTime = makeHarness([candidate], {
+    transformFilteredDocuments: (documents) => documents.map((document) => ({
+      ...document, time: BASE_TIME + 11,
+    })),
+  });
+  const timed = await badTime.adapter.search({
+    action: "search", queries: ["time clue"], after, before,
+  }, execution());
+  assert.deepEqual(timed.results, []);
+
+  const failed = makeHarness([candidate], { failFilter: true });
+  const unavailable = await failed.adapter.search({
+    action: "search", queries: ["time clue"],
+  }, execution());
+  assert.deepEqual(unavailable.results, []);
+  assert.equal(failed.legacyCalls, 0);
+}
+
+// Search results and opaque continuation cursors retain fixed-size snippets, not
+// complete message bodies from authoritative semantic scans.
+{
+  const forbiddenTail = "FULL_MESSAGE_BODY_MUST_NOT_BE_RETAINED";
+  const candidates = [
+    fixtureCandidate({
+      sessionId: IDS[4],
+      evidence: [evidence(0, 20, `retention clue ${"x".repeat(20_000)}${forbiddenTail}`)],
+    }),
+    fixtureCandidate({
+      sessionId: IDS[5],
+      evidence: [evidence(0, 21, "retention clue second result")],
+    }),
+  ];
+  const harness = makeHarness(candidates);
+  const first = await harness.adapter.search({
+    action: "search", queries: ["retention clue"], limit: 1,
+  }, execution());
+  assert.equal(first.results[0].evidence[0].snippet.length <= 320, true);
+  assert.equal(JSON.stringify(first).includes(forbiddenTail), false);
+  assert.match(first.nextCursor, /^qq-session-history:/u);
+  assert.equal(first.nextCursor.includes(forbiddenTail), false);
+  const second = await harness.adapter.search({
+    action: "search", queries: ["retention clue"], limit: 1, cursor: first.nextCursor,
+  }, execution());
+  assert.equal(JSON.stringify(second).includes(forbiddenTail), false);
+  assert.equal(harness.eventReadCalls.length, 0);
 }
 
 // Context remains one bounded authoritative read; roles and non-conversation
@@ -415,7 +566,8 @@ for (let count = 1; count <= 5; count += 1) {
   ], [IDS[5], IDS[6], IDS[7]]);
   assert.equal(third.nextCursor, undefined);
   assert.equal(harness.searchCalls, 3);
-  assert.equal(harness.verifyCalls, 1, "frozen continuations must not re-verify changing membership");
+  assert.equal(harness.eventFilterCalls.length, 3, "initial materialization scans each unique session once");
+  assert.equal(harness.verifyCalls, 0);
   assert.equal(harness.legacyCalls, 0);
 }
 
@@ -459,18 +611,25 @@ for (let count = 1; count <= 5; count += 1) {
 {
   const candidate = fixtureCandidate({ sessionId: IDS[9], evidence: [evidence(0, 1, "closed clue")] });
   const base = makeHarness([candidate]);
-  const missing = createSessionHistoryAdapter(base.sessionQuery, undefined);
-  await assert.rejects(missing.search({ action: "search", queries: ["closed"] }, execution()), /not mounted/u);
+  const missing = createSessionHistoryAdapter(base.sessionQuery, undefined, { searchTimeoutMs: 25 });
+  await assert.rejects(
+    missing.search({ action: "search", queries: ["closed"] }, execution()),
+    (error) => /not mounted/u.test(error.message) && error.code !== "SESSION_HISTORY_SEARCH_TIMEOUT",
+  );
 
   for (const index of [
     {},
-    { ready: () => false, searchBatch() {}, deriveWorkspaceScopeToken() {}, verifyDshSearchCandidates() {} },
-    { ready: () => { throw new Error("bad status"); }, searchBatch() {}, deriveWorkspaceScopeToken() {}, verifyDshSearchCandidates() {} },
+    { ready: () => false, searchBatch() {}, deriveWorkspaceScopeToken() {} },
+    { ready: () => { throw new Error("bad status"); }, searchBatch() {}, deriveWorkspaceScopeToken() {} },
   ]) {
-    const adapter = createSessionHistoryAdapter(base.sessionQuery, index);
-    await assert.rejects(adapter.search({ action: "search", queries: ["closed"] }, execution()), /unavailable|not mounted|not ready/u);
+    const adapter = createSessionHistoryAdapter(base.sessionQuery, index, { searchTimeoutMs: 25 });
+    await assert.rejects(
+      adapter.search({ action: "search", queries: ["closed"] }, execution()),
+      (error) => /unavailable|not mounted|not ready/u.test(error.message)
+        && error.code !== "SESSION_HISTORY_SEARCH_TIMEOUT",
+    );
   }
-  for (const mode of ["failSearch", "malformedResponse", "failVerify", "malformedVerify", "failMetadata"]) {
+  for (const mode of ["failSearch", "malformedResponse", "failMetadata"]) {
     const harness = makeHarness([candidate], { [mode]: true });
     await assert.rejects(harness.adapter.search({ action: "search", queries: ["closed clue"] }, execution()));
     assert.equal(harness.legacyCalls, 0, `${mode} must not fall back`);
@@ -485,6 +644,61 @@ for (let count = 1; count <= 5; count += 1) {
   assert.equal(tooMany.searchCalls, 0);
 }
 
+// Fused score contributions must bind to the same source rank/document pointer;
+// inconsistent daemon output fails closed before any transcript scan.
+{
+  const candidate = fixtureCandidate({ sessionId: IDS[9], evidence: [evidence(0, 1, "integrity clue")] });
+  const harness = makeHarness([candidate], {
+    transformResponse(response) {
+      response.fused[0].contributions[0].documentKey = "inconsistent-document";
+      return response;
+    },
+  });
+  await assert.rejects(
+    harness.adapter.search({ action: "search", queries: ["integrity clue"] }, execution()),
+    /inconsistent .* contributions/u,
+  );
+  assert.equal(harness.eventFilterCalls.length, 0);
+  assert.equal(harness.legacyCalls, 0);
+}
+
+// A stale-ready downstream stage that never resolves cannot keep search pending.
+// The production ceiling is 15 seconds; this injected 25ms ceiling is deterministic.
+{
+  const candidate = fixtureCandidate({ sessionId: IDS[10], evidence: [evidence(0, 1, "timeout clue")] });
+  const harness = makeHarness([candidate], { searchNeverSettles: true, searchTimeoutMs: 25 });
+  const started = Date.now();
+  let observed;
+  await assert.rejects(
+    harness.adapter.search({ action: "search", queries: ["timeout clue"] }, execution()),
+    (error) => {
+      observed = error;
+      return true;
+    },
+  );
+  assert.equal(observed.name, "SessionHistorySearchTimeoutError");
+  assert.equal(observed.code, "SESSION_HISTORY_SEARCH_TIMEOUT");
+  assert.equal(observed.retryable, true);
+  assert.match(observed.message, /timed out after 25ms; retry/u);
+  assert.equal(Date.now() - started < 500, true, "wall-clock guard must settle promptly");
+  assert.equal(harness.searchOptions[0].signal.aborted, true);
+  assert.equal(harness.legacyCalls, 0);
+
+  const scanHang = makeHarness([candidate], { filterNeverSettles: true, searchTimeoutMs: 25 });
+  let scanError;
+  await assert.rejects(
+    scanHang.adapter.search({ action: "search", queries: ["timeout clue"] }, execution()),
+    (error) => {
+      scanError = error;
+      return true;
+    },
+  );
+  assert.equal(scanError.code, "SESSION_HISTORY_SEARCH_TIMEOUT");
+  assert.equal(scanError.retryable, true);
+  assert.equal(scanHang.eventFilterCalls.length, 1);
+  assert.equal(scanHang.eventReadCalls.length, 0);
+}
+
 // Abort is forwarded to search and helper operations and prevents legacy work.
 {
   const candidate = fixtureCandidate({ sessionId: IDS[10], evidence: [evidence(0, 1, "abort clue")] });
@@ -494,26 +708,36 @@ for (let count = 1; count <= 5; count += 1) {
     { action: "search", queries: ["abort clue"] },
     execution({ signal: controller.signal }),
   );
+  await waitFor(() => searchAbort.searchCalls === 1);
   controller.abort(new Error("operator cancelled"));
   await assert.rejects(pending, /operator cancelled/u);
-  assert.equal(searchAbort.searchOptions[0].signal, controller.signal);
+  assert.notEqual(searchAbort.searchOptions[0].signal, controller.signal);
+  assert.equal(searchAbort.searchOptions[0].signal.aborted, true);
+  assert.match(searchAbort.searchOptions[0].signal.reason.message, /operator cancelled/u);
   assert.equal(searchAbort.legacyCalls, 0);
 
-  const verifyAbort = makeHarness([candidate], { readDelay: 20 });
-  const verificationController = new AbortController();
-  const verifying = verifyAbort.adapter.search(
+  const scanAbort = makeHarness([candidate], { readDelay: 20 });
+  const scanController = new AbortController();
+  const scanning = scanAbort.adapter.search(
     { action: "search", queries: ["abort clue"] },
-    execution({ signal: verificationController.signal }),
+    execution({ signal: scanController.signal }),
   );
-  await delay(1);
-  verificationController.abort(new Error("verification cancelled"));
-  await assert.rejects(verifying, /verification cancelled/u);
-  assert.equal(verifyAbort.verifyOptions[0].signal, verificationController.signal);
-  assert.equal(verifyAbort.legacyCalls, 0);
+  await waitFor(() => scanAbort.eventFilterCalls.length === 1);
+  scanController.abort(new Error("semantic scan cancelled"));
+  await assert.rejects(scanning, /semantic scan cancelled/u);
+  assert.equal(scanAbort.legacyCalls, 0);
 }
 
 console.log("qq-core durable session history: ok");
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitFor(predicate, timeoutMs = 250) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("test condition did not become true promptly");
+    await delay(1);
+  }
 }

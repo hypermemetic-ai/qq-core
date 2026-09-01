@@ -100,7 +100,7 @@ assert.match(readme, /`QQ_DSH_HAVE_INDEX` gates the optional `qq-index` plugin/)
 assert.match(readme, /canonical sibling checkout `qq-index` only when its package/);
 assert.match(readme, /provides the independent\n`qq-session-index` capability/);
 assert.match(readme, /deriveWorkspaceScopeToken/);
-assert.match(readme, /verifyDshSearchCandidates/);
+assert.match(readme, /one authoritative semantic-document scan/);
 assert.match(readme, /\$\{XDG_RUNTIME_DIR\}\/qq-index\/session-index\.sock/);
 assert.match(readme, /there is no FTS fallback/);
 assert.match(readme, /at most 16 authorization scope/);
@@ -113,7 +113,9 @@ for (const source of readdirSync(join(packageRoot, "src")).filter((name) => name
 const historySource = read("src/session-history.mjs");
 assert.doesNotMatch(historySource, /searchSessions/);
 assert.match(historySource, /search-batch-v1/);
-assert.match(historySource, /verifyDshSearchCandidates/);
+assert.doesNotMatch(historySource, /verifyDshSearchCandidates/);
+assert.match(historySource, /filterEvents\(candidate\.sessionId, plan\.eventFilters\)/);
+assert.match(historySource, /DEFAULT_SEARCH_TIMEOUT_MS = 15_000/);
 assert.match(historySource, /listAuthorizedWorkspaceIds: qq\?\.listAuthorizedWorkspaceIds/);
 assert.doesNotMatch(historySource, /qq\?\.listProjects/);
 
