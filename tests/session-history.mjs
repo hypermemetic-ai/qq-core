@@ -143,7 +143,9 @@ function makeHarness(candidates, options = {}) {
         });
       }
       if (options.malformedResponse) return { bad: true };
-      return responseFor(candidates, request.literals.length);
+      const response = responseFor(candidates, request.literals.length);
+      options.mutateResponse?.(response);
+      return response;
     },
     async verifyDshSearchCandidates(argument) {
       verifyCalls += 1;
@@ -322,6 +324,126 @@ for (let count = 1; count <= 5; count += 1) {
   assert.equal(result.results[0].alias, "12");
   assert.deepEqual(result.results[0].evidence.map(({ role }) => role),
     queries.map((_, index) => index % 2 ? "assistant" : "user"));
+}
+
+// Legacy durable rows use raw UUID identities. Validate every row first, then
+// omit noncanonical identities before exact verification without renumbering the
+// canonical source/fused ranks or changing contribution coordinates.
+{
+  const legacyId = "00000000-0000-4000-8000-000000000099";
+  const candidates = [
+    fixtureCandidate({ sessionId: legacyId, evidence: [evidence(0, 1, "legacy clue")] }),
+    fixtureCandidate({ sessionId: IDS[1], evidence: [evidence(0, 2, "legacy clue")] }),
+  ];
+  const harness = makeHarness(candidates);
+  const result = await harness.adapter.search({ action: "search", queries: ["legacy clue"] }, execution());
+  const verifiedResponse = harness.verifyOptions[0].searchResponse;
+  assert.deepEqual(verifiedResponse.sources[0].ranked.map(({ sessionId }) => sessionId), [IDS[1]]);
+  assert.deepEqual(verifiedResponse.sources[0].ranked.map(({ rank }) => rank), [2]);
+  assert.deepEqual(verifiedResponse.fused.map(({ sessionId }) => sessionId), [IDS[1]]);
+  assert.deepEqual(verifiedResponse.fused.map(({ rank }) => rank), [2]);
+  assert.deepEqual(verifiedResponse.fused[0].contributions.map((item) => ({
+    queryOrdinal: item.queryOrdinal,
+    sourceRank: item.sourceRank,
+    contribution: item.contribution,
+    documentKey: item.documentKey,
+    seq: item.seq,
+  })), [{
+    queryOrdinal: 0,
+    sourceRank: 2,
+    contribution: 1 / 62,
+    documentKey: `${IDS[1]}:2:0`,
+    seq: "2",
+  }]);
+  assert.equal(JSON.stringify(verifiedResponse).includes(legacyId), false);
+  assert.deepEqual(result.results.map(({ sessionId }) => sessionId), [IDS[1]]);
+  assert.equal(result.results[0].evidence[0].sourceRank, 2);
+  assert.equal(harness.legacyCalls, 0);
+}
+
+// An all-legacy response is a valid empty search, not a protocol failure, and no
+// raw UUID reaches the verifier even though the full daemon response was valid.
+{
+  const legacyId = "00000000-0000-4000-8000-000000000098";
+  const harness = makeHarness([
+    fixtureCandidate({ sessionId: legacyId, evidence: [evidence(0, 1, "legacy only")] }),
+  ]);
+  const result = await harness.adapter.search({ action: "search", queries: ["legacy only"] }, execution());
+  assert.deepEqual(result.results, []);
+  assert.deepEqual(harness.verifyOptions[0].searchResponse.sources[0].ranked, []);
+  assert.deepEqual(harness.verifyOptions[0].searchResponse.fused, []);
+  assert.equal(harness.verifyCalls, 1);
+  assert.equal(harness.legacyCalls, 0);
+}
+
+// A nominally canonical fused row supported only by an omitted legacy pointer is
+// omitted too; identity filtering must not manufacture usable fused evidence.
+{
+  const harness = makeHarness([
+    fixtureCandidate({
+      sessionId: "00000000-0000-4000-8000-000000000096",
+      evidence: [evidence(0, 1, "legacy pointer")],
+    }),
+  ], {
+    mutateResponse(response) {
+      response.fused[0].sessionId = IDS[2];
+    },
+  });
+  const result = await harness.adapter.search({ action: "search", queries: ["legacy pointer"] }, execution());
+  assert.deepEqual(result.results, []);
+  assert.deepEqual(harness.verifyOptions[0].searchResponse.sources[0].ranked, []);
+  assert.deepEqual(harness.verifyOptions[0].searchResponse.fused, []);
+}
+
+// Identity filtering is strictly second-stage: malformed non-ID fields on both
+// canonical and legacy source/fused rows still fail closed before verification.
+for (const [identity, sessionId] of [
+  ["legacy", "00000000-0000-4000-8000-000000000097"],
+  ["canonical", IDS[2]],
+]) {
+  for (const [row, mutateResponse, expected] of [
+    ["source", (response) => {
+      response.sources[0].ranked[0].evidence.eventType = "tool/result";
+    }, /ranked evidence/u],
+    ["fused", (response) => {
+      response.fused[0].contributions[0].sourceRank = 0;
+    }, /fused contributions/u],
+  ]) {
+    const label = `${identity} ${row}`;
+    const harness = makeHarness([
+      fixtureCandidate({ sessionId, evidence: [evidence(0, 1, "malformed identity")] }),
+    ], { mutateResponse });
+    await assert.rejects(
+      harness.adapter.search({ action: "search", queries: ["malformed identity"] }, execution()),
+      expected,
+      label,
+    );
+    assert.equal(harness.verifyCalls, 0, `${label} must fail before verification`);
+    assert.equal(harness.legacyCalls, 0);
+  }
+}
+
+// Duplicate legacy fused identities are rejected before they can be omitted.
+{
+  const harness = makeHarness([
+    fixtureCandidate({
+      sessionId: "00000000-0000-4000-8000-000000000094",
+      evidence: [evidence(0, 1, "duplicate legacy")],
+    }),
+    fixtureCandidate({
+      sessionId: "00000000-0000-4000-8000-000000000095",
+      evidence: [evidence(0, 2, "duplicate legacy")],
+    }),
+  ], {
+    mutateResponse(response) {
+      response.fused[1].sessionId = response.fused[0].sessionId;
+    },
+  });
+  await assert.rejects(
+    harness.adapter.search({ action: "search", queries: ["duplicate legacy"] }, execution()),
+    /fused results/u,
+  );
+  assert.equal(harness.verifyCalls, 0);
 }
 
 // Workspace/session/as-of filters are sent to the durable service and rechecked
