@@ -144,7 +144,7 @@ function makeHarness(candidates, options = {}) {
       }
       if (options.malformedResponse) return { bad: true };
       const response = responseFor(candidates, request.literals.length);
-      options.mutateResponse?.(response);
+      options.mutateResponse?.(response, request, searchCalls);
       return response;
     },
     async verifyDshSearchCandidates(argument) {
@@ -172,7 +172,8 @@ function makeHarness(candidates, options = {}) {
             argument.signal?.throwIfAborted?.();
             const document = documents[0];
             if (!document || document.type !== pointer.eventType || document.surface !== pointer.surface) continue;
-            if (!document.text.toLowerCase().includes(argument.literals[source.queryOrdinal].toLowerCase())) continue;
+            const snippet = document.text.replaceAll(/\s+/g, " ").trim();
+            if (!snippet.toLowerCase().includes(argument.literals[source.queryOrdinal].toLowerCase())) continue;
             verifiedEvidence.push({
               queryOrdinal: source.queryOrdinal,
               sessionId: pointer.sessionId,
@@ -180,15 +181,33 @@ function makeHarness(candidates, options = {}) {
               documentKey: pointer.documentKey,
               eventType: pointer.eventType,
               surface: pointer.surface,
+              eventTimeUnixMs: document.time,
+              snippet,
             });
           }
         },
       );
       await Promise.all(workers);
-      const verifiedIds = new Set(verifiedEvidence.map(({ sessionId }) => sessionId));
+      const verifiedKeys = new Set(verifiedEvidence.map((item) => JSON.stringify([
+        item.sessionId, item.queryOrdinal, item.seq, item.documentKey,
+      ])));
+      const verifiedCandidates = argument.searchResponse.fused.flatMap((candidate) => (
+        candidate.contributions.every((contribution) => verifiedKeys.has(JSON.stringify([
+          candidate.sessionId,
+          contribution.queryOrdinal,
+          contribution.seq,
+          contribution.documentKey,
+        ])))
+          ? [{
+              ...candidate,
+              ...(titles.has(candidate.sessionId) ? { title: titles.get(candidate.sessionId) } : {}),
+            }]
+          : []
+      ));
+      const retained = new Set(verifiedCandidates.map(({ sessionId }) => sessionId));
       return {
-        verifiedCandidates: argument.searchResponse.fused.filter(({ sessionId }) => verifiedIds.has(sessionId)),
-        verifiedEvidence,
+        verifiedCandidates,
+        verifiedEvidence: verifiedEvidence.filter(({ sessionId }) => retained.has(sessionId)),
       };
     },
   };
@@ -309,19 +328,38 @@ for (let count = 1; count <= 5; count += 1) {
   assert.equal(harness.legacyCalls, 0);
   assert.deepEqual(harness.requests[0].literals, queries);
   assert.equal(harness.requests[0].version, "search-batch-v1");
-  assert.equal(harness.requests[0].perSourceDepth, 100);
-  assert.equal(harness.requests[0].finalLimit, 100);
+  assert.equal(harness.requests[0].perSourceDepth, 15);
+  assert.equal(harness.requests[0].finalLimit, 15);
   assert.deepEqual(harness.requests[0].filters.eventTypeAllowList, ["user/message", "assistant/message"]);
   assert.deepEqual(harness.requests[0].filters.surfaceAllowList, ["current", "shadowed"]);
   assert.deepEqual(harness.tokenWorkspaces, ["/work"]);
   assert.equal(harness.verifyOptions[0].maxConcurrency, internals.MAX_VERIFICATION_CONCURRENCY);
-  assert.equal(harness.verifyOptions[0].maxCandidates, internals.MAX_VERIFICATION_POINTERS);
+  assert.equal(harness.verifyOptions[0].maxCandidates, count);
   assert.equal(harness.verifyOptions[0].signal, undefined);
   assert.equal(harness.peakReads <= internals.MAX_VERIFICATION_CONCURRENCY, true);
   assert.equal(result.results.length, 1);
   assert.equal(result.results[0].matchedQueryCount, count);
   assert.equal(result.results[0].title, "Durable result");
   assert.equal(result.results[0].alias, "12");
+  assert.equal(result.diagnostics.strategyVersion, internals.SEARCH_STRATEGY_VERSION);
+  assert.equal(result.diagnostics.rungsExecuted, 1);
+  assert.equal(result.diagnostics.rungDepth, 15);
+  assert.equal(result.diagnostics.maxCandidates, count);
+  assert.deepEqual(result.diagnostics.counts, {
+    sourceHits: count,
+    fusedCandidates: 1,
+    verifiedCandidates: 1,
+    authorizedCandidates: 1,
+    uniqueSessions: 1,
+    coordinates: count,
+  });
+  for (const value of Object.values(result.diagnostics.timingsMs)) {
+    assert.equal(Number.isFinite(value) && value >= 0, true);
+  }
+  const serializedDiagnostics = JSON.stringify(result.diagnostics);
+  assert.equal(serializedDiagnostics.includes(queries[0]), false);
+  assert.equal(serializedDiagnostics.includes(candidate.sessionId), false);
+  assert.equal(serializedDiagnostics.includes("/work"), false);
   assert.deepEqual(result.results[0].evidence.map(({ role }) => role),
     queries.map((_, index) => index % 2 ? "assistant" : "user"));
 }
@@ -423,6 +461,27 @@ for (const [identity, sessionId] of [
   }
 }
 
+// Truncation flags and reasons are one closed semantic pair; contradictory
+// combinations cannot suppress or force progressive expansion.
+for (const [truncated, truncationReason] of [
+  [false, "source-depth"],
+  [true, "exhausted"],
+]) {
+  const harness = makeHarness([
+    fixtureCandidate({ sessionId: IDS[2], evidence: [evidence(0, 1, "truncation pair")] }),
+  ], {
+    mutateResponse(response) {
+      response.sources[0].truncated = truncated;
+      response.sources[0].truncationReason = truncationReason;
+    },
+  });
+  await assert.rejects(
+    harness.adapter.search({ action: "search", queries: ["truncation pair"] }, execution()),
+    /source results/u,
+  );
+  assert.equal(harness.verifyCalls, 0);
+}
+
 // Duplicate legacy fused identities are rejected before they can be omitted.
 {
   const harness = makeHarness([
@@ -481,20 +540,54 @@ for (const [identity, sessionId] of [
   assert.deepEqual(allResult.results.map(({ sessionId }) => sessionId), [CALLER, IDS[1]]);
 }
 
-// A stale event whose authoritative time/text changed is omitted even when both
-// the index response and a malformed verifier claim it is valid.
+// Search consumes the verifier's bounded authoritative facts once; core performs
+// no duplicate event/title read and rejects malformed presentation facts.
 {
-  const stale = fixtureCandidate({ sessionId: IDS[3], evidence: [evidence(0, 4, "fresh literal")] });
-  const harness = makeHarness([stale]);
-  const original = harness.sessionQuery.readEvent;
-  harness.sessionQuery.readEvent = async (...args) => {
-    const observed = await original(...args);
-    observed.target.data.content[0].text = "authoritative replacement";
-    return observed;
+  const candidate = fixtureCandidate({
+    sessionId: IDS[3],
+    title: "Verified title",
+    evidence: [evidence(0, 4, "fresh literal")],
+  });
+  const harness = makeHarness([candidate]);
+  harness.sessionQuery.readEvent = async () => { throw new Error("SEARCH MUST NOT REREAD EVENT"); };
+  harness.sessionQuery.readTitleSnapshots = async () => { throw new Error("SEARCH MUST NOT REREAD TITLE"); };
+  const result = await harness.adapter.search({ action: "search", queries: ["fresh literal"] }, execution());
+  assert.equal(result.results[0].title, "Verified title");
+  assert.equal(result.results[0].evidence[0].snippet, "fresh literal");
+}
+for (const mutate of [
+  (verification) => { delete verification.verifiedEvidence[0].eventTimeUnixMs; },
+  (verification) => { verification.verifiedEvidence[0].snippet = "x".repeat(321); },
+  (verification) => { verification.verifiedCandidates[0].title = "x".repeat(257); },
+]) {
+  const candidate = fixtureCandidate({
+    sessionId: IDS[3],
+    title: "Verified title",
+    evidence: [evidence(0, 4, "fresh literal")],
+  });
+  const harness = makeHarness([candidate]);
+  const originalVerify = harness.index.verifyDshSearchCandidates;
+  harness.index.verifyDshSearchCandidates = async (argument) => {
+    const verification = await originalVerify(argument);
+    mutate(verification);
+    return verification;
+  };
+  await assert.rejects(
+    harness.adapter.search({ action: "search", queries: ["fresh literal"] }, execution()),
+    /verified evidence|verified candidates/u,
+  );
+}
+{
+  const candidate = fixtureCandidate({ sessionId: IDS[3], evidence: [evidence(0, 4, "fresh literal")] });
+  const harness = makeHarness([candidate]);
+  const originalVerify = harness.index.verifyDshSearchCandidates;
+  harness.index.verifyDshSearchCandidates = async (argument) => {
+    const verification = await originalVerify(argument);
+    verification.verifiedEvidence = [];
+    return verification;
   };
   const result = await harness.adapter.search({ action: "search", queries: ["fresh literal"] }, execution());
-  assert.deepEqual(result.results, []);
-  assert.equal(harness.legacyCalls, 0);
+  assert.deepEqual(result.results, [], "partial verified candidates must fail closed");
 }
 
 // Context remains one bounded authoritative read; roles and non-conversation
@@ -520,6 +613,39 @@ for (const [identity, sessionId] of [
   assert.equal(context.rawEventBound.after, 50);
   assert.equal(harness.searchCalls, 0);
   assert.equal(harness.legacyCalls, 0);
+}
+
+// A truncated shallow rung expands only when verified authorized results cannot
+// fill the requested page, then freezes the final verified rung for pagination.
+{
+  const candidates = [0, 1, 2].map((index) => fixtureCandidate({
+    sessionId: IDS[5 + index],
+    evidence: [evidence(0, index + 1, `ladder clue ${index}`)],
+  }));
+  const harness = makeHarness(candidates, {
+    mutateResponse(response, request) {
+      if (request.perSourceDepth !== 8) return;
+      response.sources = response.sources.map((source) => ({
+        ...source,
+        ranked: source.ranked.slice(0, 1),
+        truncated: true,
+        truncationReason: "source-depth",
+      }));
+      response.fused = response.fused.slice(0, 1);
+      response.fusedTruncated = true;
+    },
+  });
+  const result = await harness.adapter.search({
+    action: "search", queries: ["ladder clue"], limit: 2,
+  }, execution());
+  assert.deepEqual(harness.requests.map(({ perSourceDepth }) => perSourceDepth), [8, 32]);
+  assert.deepEqual(harness.requests.map(({ finalLimit }) => finalLimit), [8, 32]);
+  assert.deepEqual(harness.verifyOptions.map(({ maxCandidates }) => maxCandidates), [1, 3]);
+  assert.equal(result.diagnostics.rungsExecuted, 2);
+  assert.equal(result.diagnostics.rungDepth, 32);
+  assert.equal(result.diagnostics.counts.authorizedCandidates, 3);
+  assert.equal(result.results.length, 2);
+  assert.match(result.nextCursor, /^qq-session-history:/u);
 }
 
 // Complete pagination preserves the frozen durable order across all pages.
@@ -574,6 +700,28 @@ for (const [identity, sessionId] of [
     /cursor is invalid/u,
   );
   assert.equal(harness.legacyCalls, 0);
+}
+
+// Repeated searches within one scoped adapter retain only a fixed number of
+// one-use cursors; the oldest token is evicted without disturbing the newest.
+{
+  const candidates = [0, 1].map((index) => fixtureCandidate({
+    sessionId: IDS[5 + index],
+    evidence: [evidence(0, index + 1, `cursor cap clue ${index}`)],
+  }));
+  const harness = makeHarness(candidates);
+  const input = { action: "search", queries: ["cursor cap clue"], limit: 1 };
+  const cursors = [];
+  for (let index = 0; index <= internals.MAX_FUSED_CURSORS; index += 1) {
+    const page = await harness.adapter.search(input, execution());
+    cursors.push(page.nextCursor);
+  }
+  await assert.rejects(
+    harness.adapter.search({ ...input, cursor: cursors[0] }, execution()),
+    /cursor is invalid/u,
+  );
+  const newest = await harness.adapter.search({ ...input, cursor: cursors.at(-1) }, execution());
+  assert.equal(newest.results[0].sessionId, IDS[6]);
 }
 
 // Missing, disabled/unready, malformed, and failing injected services all fail
