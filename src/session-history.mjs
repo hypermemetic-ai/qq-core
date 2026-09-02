@@ -465,7 +465,14 @@ function protocolSessionId(value) {
     && Buffer.byteLength(value, "utf8") <= 128;
 }
 
-function validateBatchResponse(response, queryCount) {
+function validateBatchResponse(response, queryCount, bounds = {}) {
+  const perSourceDepth = bounds.perSourceDepth ?? MULTI_QUERY_SOURCE_DEPTH;
+  const finalLimit = bounds.finalLimit ?? MAX_BATCH_RESULTS;
+  if (!Number.isInteger(perSourceDepth) || perSourceDepth < 1
+      || perSourceDepth > MULTI_QUERY_SOURCE_DEPTH || !Number.isInteger(finalLimit)
+      || finalLimit < 1 || finalLimit > MAX_BATCH_RESULTS) {
+    throw new Error("session_history refused invalid qq-session-index response bounds");
+  }
   requireObject(response, "qq-session-index search response");
   if (response.type !== "searchBatch" || response.version !== SEARCH_BATCH_RESPONSE_VERSION) {
     throw new Error("session_history refused a malformed qq-session-index search response version");
@@ -478,14 +485,14 @@ function validateBatchResponse(response, queryCount) {
     throw new Error("session_history refused a malformed qq-session-index search snapshot");
   }
   if (!Array.isArray(response.sources) || response.sources.length !== queryCount
-      || !Array.isArray(response.fused) || response.fused.length > MAX_BATCH_RESULTS
+      || !Array.isArray(response.fused) || response.fused.length > finalLimit
       || typeof response.fusedTruncated !== "boolean") {
     throw new Error("session_history refused a malformed qq-session-index search response");
   }
   for (let index = 0; index < response.sources.length; index += 1) {
     const source = response.sources[index];
     if (!source || typeof source !== "object" || source.queryOrdinal !== index
-        || !Array.isArray(source.ranked) || source.ranked.length > MULTI_QUERY_SOURCE_DEPTH
+        || !Array.isArray(source.ranked) || source.ranked.length > perSourceDepth
         || typeof source.truncated !== "boolean"
         || !["exhausted", "source-depth", "posting-budget"].includes(source.truncationReason)
         || !Number.isInteger(source.rawPostingsScanned)
@@ -526,7 +533,7 @@ function validateBatchResponse(response, queryCount) {
           || contribution.queryOrdinal < 0 || contribution.queryOrdinal >= queryCount
           || ordinals.has(contribution.queryOrdinal)
           || !Number.isInteger(contribution.sourceRank) || contribution.sourceRank < 1
-          || contribution.sourceRank > MULTI_QUERY_SOURCE_DEPTH
+          || contribution.sourceRank > perSourceDepth
           || !Number.isFinite(contribution.contribution)
           || !contribution.documentKey || typeof contribution.documentKey !== "string"
           || !canonicalSequence(contribution.seq)
@@ -838,10 +845,16 @@ export function createSessionHistoryAdapter(sessionQuery, qqSessionIndex, option
       // fail-closed durable operation, while page membership/order stays frozen
       // to the previously verified snapshot carried only by this one-use token.
       const daemonStartedAt = performance.now();
+      const continuationRequest = searchBatchRequest(
+        plan,
+        authorizedWorkspaceIds,
+        scopeTokens,
+        continuation.frozen.depth,
+      );
       validateBatchResponse(await index.searchBatch(
-        searchBatchRequest(plan, authorizedWorkspaceIds, scopeTokens, continuation.frozen.depth),
+        continuationRequest,
         { signal: exec.signal },
-      ), plan.queries.length);
+      ), plan.queries.length, continuationRequest);
       const daemonSearch = elapsedMilliseconds(daemonStartedAt);
       exec.signal?.throwIfAborted?.();
       return fusedPage(plan, fingerprint, continuation.frozen, continuation.offset, totalStartedAt, {
@@ -868,7 +881,7 @@ export function createSessionHistoryAdapter(sessionQuery, qqSessionIndex, option
       const response = validateBatchResponse(await index.searchBatch(
         request,
         { signal: exec.signal },
-      ), plan.queries.length);
+      ), plan.queries.length, request);
       daemonSearch += elapsedMilliseconds(daemonStartedAt);
       exec.signal?.throwIfAborted?.();
 
