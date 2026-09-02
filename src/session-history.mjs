@@ -25,6 +25,7 @@ const SEARCH_STRATEGY_VERSION = "progressive-depth-v1";
 const MAX_SNIPPET_BYTES = 1_280;
 const MAX_TITLE_CHARS = 256;
 const MAX_TITLE_BYTES = 1_024;
+const MAX_FUSED_CURSORS = 32;
 const DEFAULT_CONTEXT_WINDOW = 3;
 const MAX_CONTEXT_WINDOW = 12;
 const CONTEXT_RAW_EVENT_BOUND = 50;
@@ -495,6 +496,7 @@ function validateBatchResponse(response, queryCount, bounds = {}) {
         || !Array.isArray(source.ranked) || source.ranked.length > perSourceDepth
         || typeof source.truncated !== "boolean"
         || !["exhausted", "source-depth", "posting-budget"].includes(source.truncationReason)
+        || source.truncated !== (source.truncationReason !== "exhausted")
         || !Number.isInteger(source.rawPostingsScanned)
         || source.rawPostingsScanned < 0 || source.rawPostingsScanned > 256) {
       throw new Error("session_history refused malformed qq-session-index source results");
@@ -792,6 +794,9 @@ export function createSessionHistoryAdapter(sessionQuery, qqSessionIndex, option
     let nextCursor;
     if (nextOffset < frozen.candidates.length) {
       nextCursor = `qq-session-history:${randomUUID()}`;
+      while (fusedCursors.size >= MAX_FUSED_CURSORS) {
+        fusedCursors.delete(fusedCursors.keys().next().value);
+      }
       fusedCursors.set(nextCursor, { fingerprint, frozen, offset: nextOffset });
     }
     return {
@@ -1444,6 +1449,7 @@ export const internals = Object.freeze({
   MAX_SNIPPET_BYTES,
   MAX_TITLE_CHARS,
   MAX_TITLE_BYTES,
+  MAX_FUSED_CURSORS,
   DEFAULT_CONTEXT_WINDOW,
   MAX_CONTEXT_WINDOW,
   CONTEXT_RAW_EVENT_BOUND,

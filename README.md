@@ -63,7 +63,9 @@ Pagination tokens are random, opaque, scoped to one adapter/authorized turn,
 and consumed on first use (including mismatch). A continuation performs one
 fail-closed batch operation but pages the frozen verified candidate set, so a
 changing index cannot reorder or inject candidates into an existing cursor.
-Cursor state retains only fixed-size verified snippets and metadata, never full message bodies.
+Each adapter retains at most 32 one-use cursors, evicting the oldest before that
+cap; cursor state retains only fixed-size verified snippets and metadata, never
+full message bodies.
 
 ### Injected interface prerequisite
 

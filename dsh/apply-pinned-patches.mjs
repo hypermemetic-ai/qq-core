@@ -37,7 +37,7 @@ const SESSION_QUERY_METHOD_PATCH = `\t/**
 \t\tconst requested = materializeEventDocumentSnapshotRequests(requests);
 \t\treturn this._corpus.projectMany([...requested.keys()], (source) => {
 \t\t\tconst seqs = requested.get(source.header.id);
-\t\t\tconst documents = buildSessionEventSearchDocuments(source.header.id, source.events).filter((document) => seqs.has(document.seq));
+\t\t\tconst documents = buildSelectedSessionEventSearchDocuments(source.header.id, source.events, seqs);
 \t\t\tconst title = foldSessionTitle(source.events);
 \t\t\treturn {
 \t\t\t\tsession: structuredClone(source.header),
@@ -51,6 +51,24 @@ const SESSION_QUERY_END_ANCHOR = `};
 //#endregion
 export { SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY, SESSION_QUERY_READ_WINDOW_MAX, SessionQueryEngine, SessionQueryEngine as default, SessionQueryError, SessionSearchCursor, assertSessionHeadersCompatible, buildSessionEventRecords, buildSessionEventSearchDocuments, compileSessionTextFilter, extractSessionEventText, filterSessionEventDocuments, filterSessionResults, materializeSessionEventResultFilters, materializeSessionResultFilters };`;
 const SESSION_QUERY_END_PATCH = `};
+function buildSelectedSessionEventSearchDocuments(sessionId, events, seqs) {
+\tconst surfaceBySeq = classifySurface(events);
+\tconst documents = [];
+\tfor (const event of events) {
+\t\tif (!seqs.has(event.seq)) continue;
+\t\tconst text = extractSessionEventText(event);
+\t\tif (text.length === 0) continue;
+\t\tdocuments.push({
+\t\t\tsessionId,
+\t\t\tseq: event.seq,
+\t\t\ttype: event.type,
+\t\t\ttime: event.time,
+\t\t\tsurface: surfaceBySeq.get(event.seq) ?? "log-only",
+\t\t\ttext
+\t\t});
+\t}
+\treturn documents;
+}
 function materializeEventDocumentSnapshotRequests(requests) {
 \tif (requests.length > SESSION_QUERY_EVENT_DOCUMENT_SNAPSHOT_MAX_COORDINATES) throw new SessionQueryError(\`event document snapshot requests may contain at most \${SESSION_QUERY_EVENT_DOCUMENT_SNAPSHOT_MAX_COORDINATES} session groups\`, "SESSION_QUERY_INVALID_LIMIT");
 \tconst grouped = /* @__PURE__ */ new Map();
@@ -100,7 +118,7 @@ export const sessionQueryPatch = Object.freeze({
   version: VERSION,
   file: "lib/index.js",
   originalSha256: SESSION_QUERY_ORIGINAL_SHA256,
-  patchedSha256: "184af05e7067053daa5c7d74695ed20e37196c60a1472c7c470edfe46d128787",
+  patchedSha256: "1cb32b032a6f0d0138640797081c37dbe5950cbd1fa963c4f294b28dfd4a3b4e",
 });
 
 export function patchSandboxSource(source) {

@@ -461,6 +461,27 @@ for (const [identity, sessionId] of [
   }
 }
 
+// Truncation flags and reasons are one closed semantic pair; contradictory
+// combinations cannot suppress or force progressive expansion.
+for (const [truncated, truncationReason] of [
+  [false, "source-depth"],
+  [true, "exhausted"],
+]) {
+  const harness = makeHarness([
+    fixtureCandidate({ sessionId: IDS[2], evidence: [evidence(0, 1, "truncation pair")] }),
+  ], {
+    mutateResponse(response) {
+      response.sources[0].truncated = truncated;
+      response.sources[0].truncationReason = truncationReason;
+    },
+  });
+  await assert.rejects(
+    harness.adapter.search({ action: "search", queries: ["truncation pair"] }, execution()),
+    /source results/u,
+  );
+  assert.equal(harness.verifyCalls, 0);
+}
+
 // Duplicate legacy fused identities are rejected before they can be omitted.
 {
   const harness = makeHarness([
@@ -679,6 +700,28 @@ for (const mutate of [
     /cursor is invalid/u,
   );
   assert.equal(harness.legacyCalls, 0);
+}
+
+// Repeated searches within one scoped adapter retain only a fixed number of
+// one-use cursors; the oldest token is evicted without disturbing the newest.
+{
+  const candidates = [0, 1].map((index) => fixtureCandidate({
+    sessionId: IDS[5 + index],
+    evidence: [evidence(0, index + 1, `cursor cap clue ${index}`)],
+  }));
+  const harness = makeHarness(candidates);
+  const input = { action: "search", queries: ["cursor cap clue"], limit: 1 };
+  const cursors = [];
+  for (let index = 0; index <= internals.MAX_FUSED_CURSORS; index += 1) {
+    const page = await harness.adapter.search(input, execution());
+    cursors.push(page.nextCursor);
+  }
+  await assert.rejects(
+    harness.adapter.search({ ...input, cursor: cursors[0] }, execution()),
+    /cursor is invalid/u,
+  );
+  const newest = await harness.adapter.search({ ...input, cursor: cursors.at(-1) }, execution());
+  assert.equal(newest.results[0].sessionId, IDS[6]);
 }
 
 // Missing, disabled/unready, malformed, and failing injected services all fail
