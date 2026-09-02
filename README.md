@@ -38,14 +38,26 @@ from the separate `qq-session-index` service provided by the optional
 `@hypermemetic-ai/qq-index` sibling. qq-core has no static sibling-package
 import and never calls the legacy `sessionQuery.searchSessions` method.
 
-For each search invocation, 1–5 normalized literal clues are sent in exactly
-one `search-batch-v1` operation. qq-core obtains workspace tokens only through
-the injected service's canonical `deriveWorkspaceScopeToken`, then calls its
-abort-aware `verifyDshSearchCandidates` with a fixed maximum of 500 evidence
-pointers and concurrency 4. Before presenting anything, qq-core rechecks the
-session header, session/current/other policy, event time/as-of boundary, role,
-surface, text, and snippets through bounded authoritative DSH reads. Context is
-still one existing `readEvent` window with a raw-event bound of 50 per side.
+For each search invocation, 1–5 normalized literal clues enter a deterministic
+page-limit-tied depth ladder. The default five-result page starts at depth/final
+limit 15 instead of 100 and expands to 45 then 100 only when exact verified,
+authorized results cannot fill the requested page and the daemon reports more
+candidates. qq-core obtains workspace tokens only through the injected service's
+canonical `deriveWorkspaceScopeToken`; each rung remains one `search-batch-v1`
+snapshot and verification is bounded to the fused contributions returned for
+that rung, with an absolute maximum of 256 coordinates and concurrency 4.
+
+`verifyDshSearchCandidates` exact-verifies every fused contribution. When the
+pinned DSH batch API is available, it groups coordinates and calls
+`readEventDocumentSnapshots` once, which lists persistence once and observes,
+projects, and title-folds each unique session once. The helper returns only
+bounded authoritative event time/snippet/title facts. qq-core strictly validates
+those facts, independently requires every fused contribution, rechecks current
+session metadata and authorization, and formats them without duplicate event or
+title reads. Search results include redacted coarse phase durations and counts;
+they never include literals, snippets, workspace tokens, or unauthorized IDs in
+diagnostics. Context remains one separate `readEvent` window with a raw-event
+bound of 50 per side.
 
 Pagination tokens are random, opaque, scoped to one adapter/authorized turn,
 and consumed on first use (including mismatch). A continuation performs one
@@ -70,9 +82,13 @@ verifyDshSearchCandidates({
 
 `ready()` must return exactly `true` before search. Missing, disabled, unready,
 malformed, or failing services and failed exact verification all fail closed;
-there is no FTS fallback. The helper's verification result must contain bounded
-`verifiedCandidates` and `verifiedEvidence` arrays in the documented
-qq-index DSH-source shape.
+there is no FTS fallback. Every retained candidate must have all fused
+contributions represented in bounded `verifiedEvidence`. Evidence carries a
+required safe-integer `eventTimeUnixMs` and normalized non-empty `snippet`
+(maximum 320 UTF-16 code units and 1280 UTF-8 bytes). A verified candidate may
+carry a plain non-empty `title` (maximum 256 code units and 1024 bytes). qq-core
+rejects malformed verification output and repeats contribution completeness as
+defense in depth.
 
 `workspace: current` authorizes only the caller's exact cwd. `workspace: all`
 uses the operator project catalog plus the caller cwd and projects root.
@@ -108,13 +124,18 @@ calls that API. This route remains fail closed on qq-index errors or absence.
 
 Deployment order:
 
-1. land a qq-index version that mounts both canonical helpers on
-   `qq-session-index` and install/build its Rust daemon;
-2. install and start the sibling's `qq-session-indexd.service` so the private
-   socket exists at the path above;
-3. restart/reload qq-core and wait for `qq-session-index.ready()` to become
-   true after source catch-up;
-4. exercise `/find-session`; any missing prerequisite produces a closed search,
-   not a call to legacy FTS.
+1. install the pinned rc.7 DSH patch so `sessionQuery.readEventDocumentSnapshots`
+   is present; this is a Node-only query-service backport and changes no Rust,
+   wire protocol, database schema, or indexed data;
+2. land a qq-index version that feature-detects that method, retains its bounded
+   exact-read fallback during rollout, and mounts both canonical helpers on
+   `qq-session-index`;
+3. activate qq-core and the already-indexed qq-index sibling together. A running
+   host that loaded the pre-patch DSH class requires one controlled host restart;
+   the index daemon and database do not require restart or rebuild;
+4. wait for `qq-session-index.ready()` and its source phase to remain live, then
+   run one bounded `/find-session` replay and inspect generation, rung, phase
+   durations, counts, result shape, and end-to-end latency. Any missing
+   prerequisite produces a closed search, not a call to legacy FTS.
 
 Focused QA is `node tests/session-history.mjs`; it is also part of `npm test`.

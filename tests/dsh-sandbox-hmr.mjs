@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { patch, patchSandboxSource } from "../dsh/apply-pinned-patches.mjs";
+import {
+  patch,
+  patchSandboxSource,
+  patchSessionQuerySource,
+  sessionQueryPatch,
+} from "../dsh/apply-pinned-patches.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const toolchainRoot = join(packageRoot, "dsh", "node_modules");
@@ -21,16 +26,37 @@ assert.throws(
   /refusing to patch .* unexpected .* sha256/,
   "unknown package source must fail closed",
 );
+const patchedSessionQuerySource = readFileSync(packageFile("dsh-session-query"), "utf8");
+assert.equal(
+  patchSessionQuerySource(patchedSessionQuerySource).changed,
+  false,
+  "installed session-query batch patch must be idempotent",
+);
+assert.throws(
+  () => patchSessionQuerySource(`${patchedSessionQuerySource}\n// drift`),
+  /refusing to patch .* unexpected .* sha256/,
+  "unknown session-query source must fail closed",
+);
 
 const pins = JSON.parse(readFileSync(join(packageRoot, "dsh", "pins.json"), "utf8"));
-assert.deepEqual(pins.dsh.patches, [{
-  package: patch.package,
-  version: patch.version,
-  file: patch.file,
-  originalSha256: patch.originalSha256,
-  patchedSha256: patch.patchedSha256,
-  purpose: "Validate sandbox modes, then treat equal or narrower requests as the standing policy without approval",
-}]);
+assert.deepEqual(pins.dsh.patches, [
+  {
+    package: patch.package,
+    version: patch.version,
+    file: patch.file,
+    originalSha256: patch.originalSha256,
+    patchedSha256: patch.patchedSha256,
+    purpose: "Validate sandbox modes, then treat equal or narrower requests as the standing policy without approval",
+  },
+  {
+    package: sessionQueryPatch.package,
+    version: sessionQueryPatch.version,
+    file: sessionQueryPatch.file,
+    originalSha256: sessionQueryPatch.originalSha256,
+    patchedSha256: sessionQueryPatch.patchedSha256,
+    purpose: "Read bounded exact semantic documents and titles from one live-preferred observation per session",
+  },
+]);
 const toolchainPackage = JSON.parse(readFileSync(join(packageRoot, "dsh", "package.json"), "utf8"));
 assert.equal(toolchainPackage.scripts.postinstall, "node apply-pinned-patches.mjs");
 
@@ -213,6 +239,64 @@ const staleInFlightArgs = JSON.parse(JSON.stringify({
 }));
 
 const { Context } = await importPackage("cordis");
+const { SessionId, SessionStore } = await importPackage("dsh-session");
+const {
+  SESSION_QUERY_EVENT_DOCUMENT_SNAPSHOT_MAX_COORDINATES,
+  SessionQueryEngine,
+} = await importPackage("dsh-session-query");
+class BatchQueryFixture extends SessionQueryEngine {
+  async searchSessions() { throw new Error("not used"); }
+  async searchEvents() { throw new Error("not used"); }
+}
+const batchCtx = new Context();
+await batchCtx.plugin(SessionStore);
+await batchCtx.plugin(BatchQueryFixture);
+const batchSession = batchCtx.sessions.create(SessionId("batch-query-live"));
+batchSession.append("user/message", {
+  role: "user",
+  content: [{ type: "text", text: "first exact document" }],
+  source: { kind: "user" },
+}, { surfaceOp: "append" });
+batchSession.append("session/title", {
+  title: "One observation title",
+  messageSeqs: [0],
+  source: { kind: "fallback" },
+});
+batchSession.append("assistant/message", {
+  turn: 0,
+  step: 0,
+  message: { role: "assistant", content: [{ type: "text", text: "second exact document" }] },
+}, { surfaceOp: "append" });
+const batchResults = await batchCtx.sessionQuery.readEventDocumentSnapshots([
+  { sessionId: batchSession.id, seqs: [2, 99] },
+  { sessionId: batchSession.id, seqs: [0, 2] },
+]);
+assert.equal(SESSION_QUERY_EVENT_DOCUMENT_SNAPSHOT_MAX_COORDINATES, 256);
+assert.equal(batchResults.length, 1);
+assert.equal(batchResults[0].status, "fulfilled");
+assert.equal(batchResults[0].value.session.id, batchSession.id);
+assert.deepEqual(batchResults[0].value.documents.map(({ seq, text }) => [seq, text]), [
+  [0, "first exact document"],
+  [2, "second exact document"],
+]);
+assert.equal(batchResults[0].value.title.title, "One observation title");
+await assert.rejects(
+  batchCtx.sessionQuery.readEventDocumentSnapshots([{
+    sessionId: batchSession.id,
+    seqs: Array.from({ length: 257 }, (_, index) => index),
+  }]),
+  /at most 256 unique coordinates/,
+);
+const preAborted = new AbortController();
+const preAbortReason = new Error("batch read cancelled");
+preAborted.abort(preAbortReason);
+await assert.rejects(
+  batchCtx.sessionQuery.readEventDocumentSnapshots([
+    { sessionId: batchSession.id, seqs: [0] },
+  ], preAborted.signal),
+  (error) => error === preAbortReason,
+);
+
 const { SystemPrompt } = await importPackage("dsh-system-prompt");
 const { ToolRuntime, defineTool } = await importPackage("dsh-tools");
 const ctx = new Context();

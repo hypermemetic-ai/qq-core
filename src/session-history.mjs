@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 export const FIND_SESSION_SKILL = "find-session";
 export const SESSION_HISTORY_TOOL = "session_history";
@@ -18,8 +19,12 @@ const SEARCH_BATCH_VERSION = "search-batch-v1";
 const SEARCH_BATCH_RESPONSE_VERSION = "search-batch-response-v1";
 const MAX_BATCH_RESULTS = 100;
 const MAX_AUTHORIZED_WORKSPACES = 16;
-const MAX_VERIFICATION_POINTERS = MAX_SEARCH_QUERIES * MULTI_QUERY_SOURCE_DEPTH;
+const MAX_VERIFICATION_POINTERS = 256;
 const MAX_VERIFICATION_CONCURRENCY = 4;
+const SEARCH_STRATEGY_VERSION = "progressive-depth-v1";
+const MAX_SNIPPET_BYTES = 1_280;
+const MAX_TITLE_CHARS = 256;
+const MAX_TITLE_BYTES = 1_024;
 const DEFAULT_CONTEXT_WINDOW = 3;
 const MAX_CONTEXT_WINDOW = 12;
 const CONTEXT_RAW_EVENT_BOUND = 50;
@@ -199,70 +204,6 @@ function conversationText(event) {
     .trim();
 }
 
-function containsLiteral(text, query) {
-  return normalizedLiteral(text).includes(normalizedLiteral(query));
-}
-
-function matchingSnippet(text, query) {
-  const normalized = String(text ?? "").replaceAll(/\s+/g, " ").trim();
-  if (normalized.length <= MAX_SNIPPET_CHARS) return normalized;
-  const at = normalized.toLocaleLowerCase().indexOf(normalizedLiteral(query));
-  const start = Math.max(0, (at < 0 ? 0 : at) - 80);
-  const end = Math.min(normalized.length, start + MAX_SNIPPET_CHARS - 2);
-  return `${start > 0 ? "…" : ""}${normalized.slice(start, end)}${end < normalized.length ? "…" : ""}`
-    .slice(0, MAX_SNIPPET_CHARS);
-}
-
-async function readConversationDocument(sessionQuery, sessionId, record, signal) {
-  if (!CONVERSATION_TYPES.includes(record?.type)
-      || !CONVERSATION_SURFACES.includes(record?.surface)
-      || !Number.isSafeInteger(record?.seq)) return undefined;
-  if (typeof sessionQuery.readEvent !== "function") {
-    throw new Error("session_history requires detached event reads to enforce conversation-only results");
-  }
-  const observation = await sessionQuery.readEvent({
-    sessionId,
-    seq: record.seq,
-    before: 0,
-    after: 0,
-  }, signal);
-  signal?.throwIfAborted?.();
-  const event = observation?.target;
-  if (event?.seq !== record.seq || event?.type !== record.type) return undefined;
-  const text = conversationText(event);
-  if (!text) return undefined;
-  return {
-    sessionId,
-    seq: event.seq,
-    time: event.time,
-    type: event.type,
-    text,
-  };
-}
-
-function titleText(result) {
-  if (result?.status !== "fulfilled") return "";
-  const title = result.value?.title;
-  if (typeof title === "string") return title.trim();
-  return typeof title?.title === "string" ? title.title.trim() : "";
-}
-
-async function titlesFor(sessionQuery, ids, signal) {
-  if (ids.length === 0 || typeof sessionQuery.readTitleSnapshots !== "function") return new Map();
-  try {
-    const settlements = await sessionQuery.readTitleSnapshots(ids, signal);
-    const titles = new Map();
-    for (const settlement of settlements ?? []) {
-      const title = titleText(settlement);
-      if (title) titles.set(settlement.sessionId, title);
-    }
-    return titles;
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    return new Map();
-  }
-}
-
 function headerId(hit) {
   return hit?.header?.id ?? hit?.session?.id ?? hit?.id;
 }
@@ -293,24 +234,6 @@ function requireIndexService(service) {
     throw new Error("session_history search is unavailable: qq-session-index is not ready");
   }
   return service;
-}
-
-async function boundedMap(values, concurrency, project, signal) {
-  const results = new Array(values.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
-    for (;;) {
-      signal?.throwIfAborted?.();
-      const index = cursor;
-      if (index >= values.length) return;
-      cursor += 1;
-      results[index] = await project(values[index], index);
-      signal?.throwIfAborted?.();
-    }
-  });
-  await Promise.all(workers);
-  signal?.throwIfAborted?.();
-  return results;
 }
 
 function stableIdCompare(left, right) {
@@ -474,7 +397,13 @@ function workspaceIdsFor(plan, listAuthorizedWorkspaceIds) {
   return workspaceIds;
 }
 
-function searchBatchRequest(plan, workspaceIds, scopeTokens) {
+function searchDepthLadder(limit) {
+  const first = Math.min(MULTI_QUERY_SOURCE_DEPTH, Math.max(8, limit * 3));
+  const second = Math.min(MULTI_QUERY_SOURCE_DEPTH, Math.max(32, first * 3));
+  return [...new Set([first, second, MULTI_QUERY_SOURCE_DEPTH])];
+}
+
+function searchBatchRequest(plan, workspaceIds, scopeTokens, depth) {
   const filters = {
     authorizedScopeTokens: scopeTokens,
     workspaceIds,
@@ -488,9 +417,41 @@ function searchBatchRequest(plan, workspaceIds, scopeTokens) {
   return {
     version: SEARCH_BATCH_VERSION,
     literals: plan.queries,
-    perSourceDepth: MULTI_QUERY_SOURCE_DEPTH,
-    finalLimit: MAX_BATCH_RESULTS,
+    perSourceDepth: depth,
+    finalLimit: Math.min(MAX_BATCH_RESULTS, Math.max(depth, plan.limit * 2)),
     filters,
+  };
+}
+
+function elapsedMilliseconds(startedAt) {
+  return Math.round((performance.now() - startedAt) * 1_000) / 1_000;
+}
+
+function candidateSetTruncated(response) {
+  return response.fusedTruncated || response.sources.some(({ truncated }) => truncated);
+}
+
+function verificationBudget(response) {
+  const contributions = response.fused.reduce((total, candidate) => (
+    total + candidate.contributions.length
+  ), 0);
+  return Math.max(1, Math.min(MAX_VERIFICATION_POINTERS, contributions));
+}
+
+function searchCounts(response, verificationCandidates, authorizedCandidates) {
+  const coordinates = new Set();
+  for (const candidate of response.fused) {
+    for (const contribution of candidate.contributions) {
+      coordinates.add(`${candidate.sessionId}\0${contribution.seq}`);
+    }
+  }
+  return {
+    sourceHits: response.sources.reduce((total, source) => total + source.ranked.length, 0),
+    fusedCandidates: response.fused.length,
+    verifiedCandidates: verificationCandidates,
+    authorizedCandidates,
+    uniqueSessions: new Set(response.fused.map(({ sessionId }) => sessionId)).size,
+    coordinates: coordinates.size,
   };
 }
 
@@ -612,7 +573,13 @@ function evidenceKey(sessionId, queryOrdinal, seq, documentKey) {
   return JSON.stringify([sessionId, queryOrdinal, String(seq), documentKey]);
 }
 
-function verifiedFusedCandidates(response, verification, queries) {
+function boundedPresentationString(value, maxChars, maxBytes, { normalized = false } = {}) {
+  if (typeof value !== "string" || value.length < 1 || value.length > maxChars
+      || Buffer.byteLength(value, "utf8") > maxBytes) return false;
+  return normalized ? value === value.replaceAll(/\s+/g, " ").trim() : value === value.trim();
+}
+
+function verifiedFusedCandidates(response, verification, plan) {
   requireObject(verification, "qq-session-index verification response");
   if (!Array.isArray(verification.verifiedCandidates)
       || verification.verifiedCandidates.length > MAX_BATCH_RESULTS
@@ -620,23 +587,34 @@ function verifiedFusedCandidates(response, verification, queries) {
       || verification.verifiedEvidence.length > MAX_VERIFICATION_POINTERS) {
     throw new Error("session_history refused a malformed qq-session-index verification response");
   }
-  const verifiedIds = new Set();
+  const responseIds = new Set(response.fused.map(({ sessionId }) => sessionId));
+  const verifiedCandidates = new Map();
   for (const candidate of verification.verifiedCandidates) {
     if (!candidate || typeof candidate !== "object" || !SESSION_ID.test(candidate.sessionId)
-        || verifiedIds.has(candidate.sessionId)) {
+        || !responseIds.has(candidate.sessionId) || verifiedCandidates.has(candidate.sessionId)
+        || (candidate.title !== undefined
+          && !boundedPresentationString(candidate.title, MAX_TITLE_CHARS, MAX_TITLE_BYTES))) {
       throw new Error("session_history refused malformed qq-session-index verified candidates");
     }
-    verifiedIds.add(candidate.sessionId);
+    verifiedCandidates.set(candidate.sessionId, candidate);
   }
   const evidence = new Map();
   for (const item of verification.verifiedEvidence) {
-    if (!item || typeof item !== "object" || typeof item.sessionId !== "string"
+    if (!item || typeof item !== "object" || !SESSION_ID.test(item.sessionId)
+        || !verifiedCandidates.has(item.sessionId)
         || !Number.isInteger(item.queryOrdinal) || item.queryOrdinal < 0
-        || item.queryOrdinal >= queries.length || typeof item.seq !== "string"
+        || item.queryOrdinal >= plan.queries.length || typeof item.seq !== "string"
         || !/^(?:0|[1-9][0-9]*)$/u.test(item.seq)
         || !Number.isSafeInteger(Number(item.seq)) || typeof item.documentKey !== "string"
-        || !CONVERSATION_TYPES.includes(item.eventType)
-        || !CONVERSATION_SURFACES.includes(item.surface)) {
+        || !item.documentKey || !CONVERSATION_TYPES.includes(item.eventType)
+        || !CONVERSATION_SURFACES.includes(item.surface)
+        || !Number.isSafeInteger(item.eventTimeUnixMs)
+        || !boundedPresentationString(
+          item.snippet,
+          MAX_SNIPPET_CHARS,
+          MAX_SNIPPET_BYTES,
+          { normalized: true },
+        )) {
       throw new Error("session_history refused malformed qq-session-index verified evidence");
     }
     const key = evidenceKey(item.sessionId, item.queryOrdinal, item.seq, item.documentKey);
@@ -652,12 +630,13 @@ function verifiedFusedCandidates(response, verification, queries) {
       throw new Error("session_history refused malformed qq-session-index fused session ids");
     }
     fusedIds.add(candidate.sessionId);
-    if (!verifiedIds.has(candidate.sessionId)) return [];
+    const verifiedCandidate = verifiedCandidates.get(candidate.sessionId);
+    if (!verifiedCandidate) return [];
     const queryOrdinals = new Set();
     const contributions = candidate.contributions.map((contribution) => {
       if (!contribution || typeof contribution !== "object"
           || !Number.isInteger(contribution.queryOrdinal)
-          || contribution.queryOrdinal < 0 || contribution.queryOrdinal >= queries.length
+          || contribution.queryOrdinal < 0 || contribution.queryOrdinal >= plan.queries.length
           || queryOrdinals.has(contribution.queryOrdinal)
           || !Number.isInteger(contribution.sourceRank) || contribution.sourceRank < 1
           || contribution.sourceRank > MULTI_QUERY_SOURCE_DEPTH
@@ -674,25 +653,27 @@ function verifiedFusedCandidates(response, verification, queries) {
         contribution.seq,
         contribution.documentKey,
       ));
-      if (!verified) return undefined;
+      if (!verified
+          || (plan.after !== undefined && verified.eventTimeUnixMs < plan.after)
+          || (plan.before !== undefined && verified.eventTimeUnixMs > plan.before)) return undefined;
       return {
         queryIndex: contribution.queryOrdinal,
         sourceRank: contribution.sourceRank,
-        query: queries[contribution.queryOrdinal],
-        record: {
+        document: {
           seq: Number(verified.seq),
+          time: verified.eventTimeUnixMs,
           type: verified.eventType,
-          surface: verified.surface,
+          snippet: verified.snippet,
         },
       };
     });
-    // A stale contribution must not survive inside an otherwise verified fused
-    // score: every source contribution is exact-read authoritative or the whole
-    // candidate is omitted.
+    // Every source contribution must remain exact-read authoritative in both the
+    // verifier and this independently validated consumer.
     if (contributions.some((contribution) => contribution === undefined)) return [];
     return [{
       sessionId: candidate.sessionId,
       score: candidate.rrfScore,
+      title: verifiedCandidate.title ?? "",
       evidence: contributions,
     }];
   });
@@ -720,65 +701,6 @@ async function authoritativeRecords(sessionQuery, ids, signal) {
   return byId;
 }
 
-async function exactCandidateDocuments(sessionQuery, candidates, plan, signal) {
-  const coordinates = new Map();
-  for (const candidate of candidates) {
-    for (const item of candidate.evidence) {
-      const key = `${candidate.sessionId}\0${item.record.seq}`;
-      const existing = coordinates.get(key);
-      if (existing && (existing.record.type !== item.record.type
-          || existing.record.surface !== item.record.surface)) {
-        throw new Error("session_history refused conflicting verified evidence coordinates");
-      }
-      const coordinate = existing ?? {
-        sessionId: candidate.sessionId,
-        record: item.record,
-        queries: new Set(),
-      };
-      coordinate.queries.add(item.query);
-      coordinates.set(key, coordinate);
-    }
-  }
-  if (coordinates.size > MAX_VERIFICATION_POINTERS) {
-    throw new Error("session_history refused unbounded qq-session-index verification work");
-  }
-  const work = [...coordinates.entries()];
-  const observations = await boundedMap(work, MAX_VERIFICATION_CONCURRENCY, async ([, coordinate]) => {
-    const document = await readConversationDocument(
-      sessionQuery,
-      coordinate.sessionId,
-      coordinate.record,
-      signal,
-    );
-    if (!document) return undefined;
-    // Keep only fixed-size presentation facts. At most four workers retain a raw
-    // event body concurrently; frozen cursor state never owns full message text.
-    const matches = new Map([...coordinate.queries].map((query) => [
-      query,
-      containsLiteral(document.text, query) ? matchingSnippet(document.text, query) : undefined,
-    ]));
-    return { seq: document.seq, time: document.time, type: document.type, matches };
-  }, signal);
-  const documents = new Map(work.map(([key], index) => [key, observations[index]]));
-
-  return candidates.flatMap((candidate) => {
-    const evidence = candidate.evidence.map((item) => {
-      const document = documents.get(`${candidate.sessionId}\0${item.record.seq}`);
-      const snippet = document?.matches.get(item.query);
-      if (!document || snippet === undefined) return undefined;
-      const time = typeof document.time === "number" ? document.time : Date.parse(String(document.time ?? ""));
-      if (!Number.isFinite(time)
-          || (plan.after !== undefined && time < plan.after)
-          || (plan.before !== undefined && time > plan.before)) return undefined;
-      return {
-        ...item,
-        document: { seq: document.seq, time: document.time, type: document.type, snippet },
-      };
-    });
-    return evidence.some((item) => item === undefined) ? [] : [{ ...candidate, evidence }];
-  });
-}
-
 function searchFingerprint(plan) {
   return JSON.stringify({
     queries: plan.queries.map(normalizedLiteral),
@@ -791,6 +713,7 @@ function searchFingerprint(plan) {
     authorizedWorkspaceIds: plan.authorizedWorkspaceIds ?? null,
     asOf: plan.asOf ?? null,
     limit: plan.limit,
+    strategyVersion: SEARCH_STRATEGY_VERSION,
   });
 }
 
@@ -823,18 +746,17 @@ export function createSessionHistoryAdapter(sessionQuery, qqSessionIndex, option
     if (disposed) throw new Error("session_history adapter is disposed");
   }
 
-  function formatCandidate(candidate, titles) {
+  function formatCandidate(candidate) {
     const record = candidate.record;
     const id = candidate.sessionId;
     let alias = "";
     if (record.live === true) {
       try { alias = String(aliasFor(id) ?? "").trim(); } catch { alias = ""; }
     }
-    const title = titles.get(id) ?? "";
     return {
       sessionId: id,
       ...(alias ? { alias } : {}),
-      ...(title ? { title } : {}),
+      ...(candidate.title ? { title: candidate.title } : {}),
       createdAt: isoTime(record.header?.createdAt),
       cwd: record.header?.cwd ?? null,
       live: record.live === true,
@@ -854,11 +776,11 @@ export function createSessionHistoryAdapter(sessionQuery, qqSessionIndex, option
     };
   }
 
-  async function fusedPage(plan, fingerprint, frozen, offset, signal) {
+  function fusedPage(plan, fingerprint, frozen, offset, totalStartedAt, diagnostics) {
+    const formatStartedAt = performance.now();
     const selected = frozen.candidates.slice(offset, offset + plan.limit);
-    const titles = await titlesFor(sessionQuery, selected.map(({ sessionId }) => sessionId), signal);
-    signal?.throwIfAborted?.();
-    const results = selected.map((candidate) => formatCandidate(candidate, titles));
+    const results = selected.map((candidate) => formatCandidate(candidate));
+    const titleFormat = elapsedMilliseconds(formatStartedAt);
     const nextOffset = offset + selected.length;
     let nextCursor;
     if (nextOffset < frozen.candidates.length) {
@@ -871,12 +793,21 @@ export function createSessionHistoryAdapter(sessionQuery, qqSessionIndex, option
       workspace: plan.workspace,
       sessionScope: plan.sessionScope,
       candidateSetTruncated: frozen.candidateSetTruncated,
+      diagnostics: {
+        ...diagnostics,
+        timingsMs: {
+          ...diagnostics.timingsMs,
+          titleFormat,
+          total: elapsedMilliseconds(totalStartedAt),
+        },
+      },
       results,
       ...(nextCursor ? { nextCursor } : {}),
     };
   }
 
   async function search(input, exec = {}) {
+    const totalStartedAt = performance.now();
     assertLive();
     const args = requireObject(input, "session_history search input");
     const plan = searchPlan(args, exec);
@@ -906,58 +837,107 @@ export function createSessionHistoryAdapter(sessionQuery, qqSessionIndex, option
       // A valid continuation remains a search invocation: perform exactly one
       // fail-closed durable operation, while page membership/order stays frozen
       // to the previously verified snapshot carried only by this one-use token.
+      const daemonStartedAt = performance.now();
       validateBatchResponse(await index.searchBatch(
-        searchBatchRequest(plan, authorizedWorkspaceIds, scopeTokens),
+        searchBatchRequest(plan, authorizedWorkspaceIds, scopeTokens, continuation.frozen.depth),
         { signal: exec.signal },
       ), plan.queries.length);
+      const daemonSearch = elapsedMilliseconds(daemonStartedAt);
       exec.signal?.throwIfAborted?.();
-      return fusedPage(plan, fingerprint, continuation.frozen, continuation.offset, exec.signal);
+      return fusedPage(plan, fingerprint, continuation.frozen, continuation.offset, totalStartedAt, {
+        ...continuation.frozen.diagnostics,
+        continuation: true,
+        timingsMs: {
+          daemonSearch,
+          exactVerification: 0,
+          metadataAuthorization: 0,
+        },
+      });
     }
 
-    // One call covers all 1–5 normalized literal sources in one immutable daemon
-    // snapshot. There is deliberately no sessionQuery full-text fallback, retry,
-    // per-literal call, or stream drain.
-    const response = validateBatchResponse(await index.searchBatch(
-      searchBatchRequest(plan, authorizedWorkspaceIds, scopeTokens),
-      { signal: exec.signal },
-    ), plan.queries.length);
-    exec.signal?.throwIfAborted?.();
+    const depths = searchDepthLadder(plan.limit);
+    let daemonSearch = 0;
+    let exactVerification = 0;
+    let metadataAuthorization = 0;
+    let final;
+    for (const [rungIndex, depth] of depths.entries()) {
+      // Each rung covers all normalized literals in one immutable daemon snapshot.
+      // Expansion happens only when verified authorized results cannot fill the page.
+      const daemonStartedAt = performance.now();
+      const request = searchBatchRequest(plan, authorizedWorkspaceIds, scopeTokens, depth);
+      const response = validateBatchResponse(await index.searchBatch(
+        request,
+        { signal: exec.signal },
+      ), plan.queries.length);
+      daemonSearch += elapsedMilliseconds(daemonStartedAt);
+      exec.signal?.throwIfAborted?.();
 
-    const verification = await index.verifyDshSearchCandidates({
-      searchResponse: response,
-      sessionQuery,
-      literals: plan.queries,
-      eventTypeAllowList: CONVERSATION_TYPES,
-      surfaceAllowList: CONVERSATION_SURFACES,
-      maxConcurrency: MAX_VERIFICATION_CONCURRENCY,
-      maxCandidates: MAX_VERIFICATION_POINTERS,
-      signal: exec.signal,
-    });
-    exec.signal?.throwIfAborted?.();
-    let candidates = verifiedFusedCandidates(response, verification, plan.queries);
+      const maxCandidates = verificationBudget(response);
+      const verificationStartedAt = performance.now();
+      const verification = await index.verifyDshSearchCandidates({
+        searchResponse: response,
+        sessionQuery,
+        literals: plan.queries,
+        eventTypeAllowList: CONVERSATION_TYPES,
+        surfaceAllowList: CONVERSATION_SURFACES,
+        maxConcurrency: MAX_VERIFICATION_CONCURRENCY,
+        maxCandidates,
+        signal: exec.signal,
+      });
+      exactVerification += elapsedMilliseconds(verificationStartedAt);
+      exec.signal?.throwIfAborted?.();
+      let candidates = verifiedFusedCandidates(response, verification, plan);
+      const verifiedCount = candidates.length;
 
-    // The index and verification helper remain policy-neutral. Bind every hit to
-    // current authoritative session metadata before any transcript clue is shown.
-    const records = await authoritativeRecords(
-      sessionQuery,
-      candidates.map(({ sessionId }) => sessionId),
-      exec.signal,
-    );
-    const authorized = new Set(authorizedWorkspaceIds);
-    candidates = candidates.flatMap((candidate) => {
-      const record = records.get(candidate.sessionId);
-      if (!record || !authorized.has(record.header.cwd)) return [];
-      if (plan.sessionScope === "current" && candidate.sessionId !== plan.callerId) return [];
-      if (plan.sessionScope === "other" && candidate.sessionId === plan.callerId) return [];
-      return [{ ...candidate, record }];
-    });
-    candidates = await exactCandidateDocuments(sessionQuery, candidates, plan, exec.signal);
+      // Bind every verified hit to current authoritative metadata before exposing
+      // transcript-derived presentation facts.
+      const metadataStartedAt = performance.now();
+      const records = await authoritativeRecords(
+        sessionQuery,
+        candidates.map(({ sessionId }) => sessionId),
+        exec.signal,
+      );
+      const authorized = new Set(authorizedWorkspaceIds);
+      candidates = candidates.flatMap((candidate) => {
+        const record = records.get(candidate.sessionId);
+        if (!record || !authorized.has(record.header.cwd)) return [];
+        if (plan.sessionScope === "current" && candidate.sessionId !== plan.callerId) return [];
+        if (plan.sessionScope === "other" && candidate.sessionId === plan.callerId) return [];
+        return [{ ...candidate, record }];
+      });
+      metadataAuthorization += elapsedMilliseconds(metadataStartedAt);
+      exec.signal?.throwIfAborted?.();
+
+      const truncated = candidateSetTruncated(response);
+      final = {
+        response,
+        depth,
+        candidates,
+        truncated,
+        diagnostics: {
+          strategyVersion: SEARCH_STRATEGY_VERSION,
+          continuation: false,
+          rungsExecuted: rungIndex + 1,
+          rungDepth: depth,
+          finalLimit: request.finalLimit,
+          maxCandidates,
+          exactObservationMode: typeof sessionQuery.readEventDocumentSnapshots === "function"
+            ? "batch"
+            : "fallback",
+          counts: searchCounts(response, verifiedCount, candidates.length),
+          timingsMs: { daemonSearch, exactVerification, metadataAuthorization },
+        },
+      };
+      if (candidates.length >= plan.limit || !truncated) break;
+    }
+    if (!final) throw new Error("session_history search depth ladder produced no rung");
     const frozen = {
-      candidateSetTruncated: response.fusedTruncated
-        || response.sources.some(({ truncated }) => truncated),
-      candidates,
+      candidateSetTruncated: final.truncated,
+      candidates: final.candidates,
+      depth: final.depth,
+      diagnostics: final.diagnostics,
     };
-    return fusedPage(plan, fingerprint, frozen, 0, exec.signal);
+    return fusedPage(plan, fingerprint, frozen, 0, totalStartedAt, final.diagnostics);
   }
 
   async function context(input, exec = {}) {
@@ -1446,6 +1426,11 @@ export const internals = Object.freeze({
   MAX_AUTHORIZED_WORKSPACES,
   MAX_VERIFICATION_POINTERS,
   MAX_VERIFICATION_CONCURRENCY,
+  SEARCH_STRATEGY_VERSION,
+  MAX_SNIPPET_CHARS,
+  MAX_SNIPPET_BYTES,
+  MAX_TITLE_CHARS,
+  MAX_TITLE_BYTES,
   DEFAULT_CONTEXT_WINDOW,
   MAX_CONTEXT_WINDOW,
   CONTEXT_RAW_EVENT_BOUND,
@@ -1458,7 +1443,6 @@ export const internals = Object.freeze({
   GESTURE,
   GRANT_ERROR,
   conversationText,
-  containsLiteral,
   containsGesture,
   directText,
   normalizeQueries,
